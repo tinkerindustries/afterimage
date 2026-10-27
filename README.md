@@ -28,3 +28,8 @@ cmake --build build
 ```
 
 The first configure fetches SDL3, SDL3_image and SDL3_ttf and needs network access. Load `build/milk_effect` in a Turret session with `effect_load`.
+
+## Docs
+
+- [docs/how-feedback-visualisers-work.md](docs/how-feedback-visualisers-work.md): how Geiss and MilkDrop produce their effects.
+- [docs/online-resources.md](docs/online-resources.md): where to watch them and find preset collections.
