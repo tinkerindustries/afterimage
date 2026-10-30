@@ -126,7 +126,15 @@ int main(int argc, char** argv) {
                     }
                 }
                 NSError* nsError = nil;
-                id<MTLLibrary> library = [device newLibraryWithSource:@(shader.msl.c_str()) options:nil error:&nsError];
+                MTLCompileOptions* options = [MTLCompileOptions new];
+                if (@available(macOS 15.0, *)) options.mathMode = MTLMathModeSafe;
+                else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        options.fastMathEnabled = NO;
+#pragma clang diagnostic pop
+    }
+                id<MTLLibrary> library = [device newLibraryWithSource:@(shader.msl.c_str()) options:options error:&nsError];
                 if (library == nil) {
                     allOk = false;
                     const std::string log = nsError.localizedDescription.UTF8String;

@@ -21,7 +21,16 @@ void PresetGpu::build(Stage& stage, ShaderStage kind, const std::string& code, i
         return;
     }
     NSError* nsError = nil;
-    id<MTLLibrary> library = [m_device newLibraryWithSource:@(stage.shader.msl.c_str()) options:nil error:&nsError];
+    // The translated shader turns NaN into 0 as Direct3D 9 does, which fast math would remove.
+    MTLCompileOptions* options = [MTLCompileOptions new];
+    if (@available(macOS 15.0, *)) options.mathMode = MTLMathModeSafe;
+    else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        options.fastMathEnabled = NO;
+#pragma clang diagnostic pop
+    }
+    id<MTLLibrary> library = [m_device newLibraryWithSource:@(stage.shader.msl.c_str()) options:options error:&nsError];
     id<MTLFunction> fragment = [library newFunctionWithName:@(stage.shader.entryPoint.c_str())];
     if (fragment == nil) {
         m_errors.push_back(std::string(label) + " shader: Metal compile failed: " +

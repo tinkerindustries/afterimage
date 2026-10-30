@@ -1201,7 +1201,10 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     if (gpu != nullptr && gpu->hasWarp()) {
         gpu->bindWarp(encoder, front, m_blur, f.wrap, values);
     } else {
-        const float decay = std::pow(f.decay, frameScale);
+        // MilkDrop passes the decay to the warp as a vertex colour byte, so it is cut to 1/255 steps
+        // and wraps above 1: decay = 9.83 acts as 0.79.
+        const float stored = presetMode ? static_cast<float>(static_cast<int>(f.decay * 255.0f) & 0xFF) / 255.0f : f.decay;
+        const float decay = std::pow(stored, frameScale);
         [encoder setRenderPipelineState:m_warpPipeline];
         [encoder setFragmentTexture:front atIndex:0];
         [encoder setFragmentSamplerState:(f.wrap ? m_repeatSampler : m_clampSampler) atIndex:0];

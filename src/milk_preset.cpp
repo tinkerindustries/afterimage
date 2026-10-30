@@ -348,7 +348,10 @@ FrameVars PresetPlayer::runFrame(const AudioLevels& audio, float time, float fps
     f.waveThick = std::fabs(get("wave_thick")) > 0.00001f;
     f.wrap = std::fabs(get("wrap")) > 0.00001f;
     m_gamma = get("gamma");
+    // The warp wraps a decay above 1 itself, as MilkDrop does, so clampFrame must not cut it.
+    const float decay = f.decay;
     clampFrame(f);
+    f.decay = decay;
 
     m_customInputs.time = time;
     m_customInputs.fps = fps;

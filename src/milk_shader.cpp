@@ -7,6 +7,7 @@
 
 #include <cctype>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <regex>
 #include <set>
@@ -569,6 +570,104 @@ bool hlslToSpirv(const std::string& hlsl, std::vector<uint32_t>& spirv, std::str
     return true;
 }
 
+// Direct3D 9 shaders multiply with 0 * infinity = 0, so 0/0 and normalize(0) give 0 where IEEE gives
+// NaN. Presets divide by zero by accident all the time, so every float multiply, divide and
+// GLSL normalize result is followed by a select that turns NaN into 0. This works on the SPIR-V
+// words: each such instruction gets a new result id and the original id moves to the select.
+void legacyArithmetic(std::vector<uint32_t>& spirv) {
+    constexpr uint32_t OP_EXT_INST_IMPORT = 11, OP_EXT_INST = 12, OP_TYPE_BOOL = 20, OP_TYPE_FLOAT = 22, OP_TYPE_VECTOR = 23,
+                       OP_CONSTANT_NULL = 46, OP_FUNCTION = 54, OP_F_MUL = 133, OP_F_DIV = 136, OP_IS_NAN = 156, OP_SELECT = 169;
+    constexpr uint32_t GLSL_NORMALIZE = 69;
+    if (spirv.size() < 5) return;
+    uint32_t bound = spirv[3];
+    uint32_t glslSet = 0;
+    uint32_t boolType = 0;
+    std::map<uint32_t, uint32_t> floatVectorSize;   // float scalar type id -> 0, float vector type id -> width
+    std::map<std::pair<uint32_t, uint32_t>, uint32_t> vectorOf;  // (component type, count) -> id
+    size_t firstFunction = spirv.size();
+    for (size_t i = 5; i < spirv.size();) {
+        const uint32_t op = spirv[i] & 0xffff, len = spirv[i] >> 16;
+        if (len == 0) return;
+        if (op == OP_EXT_INST_IMPORT && std::strcmp(reinterpret_cast<const char*>(&spirv[i + 2]), "GLSL.std.450") == 0) glslSet = spirv[i + 1];
+        if (op == OP_TYPE_BOOL) boolType = spirv[i + 1];
+        if (op == OP_TYPE_FLOAT) floatVectorSize[spirv[i + 1]] = 0;
+        if (op == OP_TYPE_VECTOR) {
+            vectorOf[{spirv[i + 2], spirv[i + 3]}] = spirv[i + 1];
+            if (floatVectorSize.count(spirv[i + 2])) floatVectorSize[spirv[i + 1]] = spirv[i + 3];
+        }
+        if (op == OP_FUNCTION) {
+            firstFunction = i;
+            break;
+        }
+        i += len;
+    }
+    std::vector<uint32_t> declarations;
+    auto emit = [&](uint32_t op, std::initializer_list<uint32_t> words) {
+        declarations.push_back((static_cast<uint32_t>(words.size() + 1) << 16) | op);
+        declarations.insert(declarations.end(), words.begin(), words.end());
+    };
+    if (boolType == 0) {
+        boolType = bound++;
+        emit(OP_TYPE_BOOL, {boolType});
+    }
+    std::map<uint32_t, uint32_t> boolFor, nullFor;  // float type id -> matching bool type, zero constant
+    auto boolOf = [&](uint32_t floatType) {
+        auto it = boolFor.find(floatType);
+        if (it != boolFor.end()) return it->second;
+        const uint32_t width = floatVectorSize[floatType];
+        uint32_t id = boolType;
+        if (width > 0) {
+            auto v = vectorOf.find({boolType, width});
+            if (v == vectorOf.end()) {
+                id = bound++;
+                emit(OP_TYPE_VECTOR, {id, boolType, width});
+                vectorOf[{boolType, width}] = id;
+            } else {
+                id = v->second;
+            }
+        }
+        boolFor[floatType] = id;
+        return id;
+    };
+    auto zeroOf = [&](uint32_t floatType) {
+        auto it = nullFor.find(floatType);
+        if (it != nullFor.end()) return it->second;
+        const uint32_t id = bound++;
+        emit(OP_CONSTANT_NULL, {floatType, id});
+        nullFor[floatType] = id;
+        return id;
+    };
+
+    std::vector<uint32_t> body;
+    for (size_t i = firstFunction; i < spirv.size();) {
+        const uint32_t op = spirv[i] & 0xffff, len = spirv[i] >> 16;
+        if (len == 0) return;
+        const bool arithmetic = (op == OP_F_MUL || op == OP_F_DIV) && len == 5;
+        const bool normalize = op == OP_EXT_INST && len == 6 && glslSet != 0 && spirv[i + 3] == glslSet && spirv[i + 4] == GLSL_NORMALIZE;
+        const uint32_t type = spirv[i + 1];
+        if ((arithmetic || normalize) && floatVectorSize.count(type)) {
+            const uint32_t original = spirv[i + 2];
+            const uint32_t fresh = bound++;
+            const uint32_t nanId = bound++;
+            const size_t start = body.size();
+            body.insert(body.end(), spirv.begin() + i, spirv.begin() + i + len);
+            body[start + 2] = fresh;
+            const uint32_t boolean = boolOf(type);
+            const uint32_t zero = zeroOf(type);
+            body.insert(body.end(), {(4u << 16) | OP_IS_NAN, boolean, nanId, fresh});
+            body.insert(body.end(), {(6u << 16) | OP_SELECT, type, original, nanId, zero, fresh});
+        } else {
+            body.insert(body.end(), spirv.begin() + i, spirv.begin() + i + len);
+        }
+        i += len;
+    }
+    std::vector<uint32_t> out(spirv.begin(), spirv.begin() + firstFunction);
+    out.insert(out.end(), declarations.begin(), declarations.end());
+    out.insert(out.end(), body.begin(), body.end());
+    out[3] = bound;
+    spirv = std::move(out);
+}
+
 bool spirvToMsl(std::vector<uint32_t> spirv, TranslatedShader& out, std::string& error) {
     try {
         spirv_cross::CompilerMSL compiler(std::move(spirv));
@@ -627,6 +726,7 @@ bool translateShader(ShaderStage stage, const std::string& presetCode, Translate
     if (!wrapBody(stage, presetCode, hlsl, error)) return false;
     std::vector<uint32_t> spirv;
     if (!hlslToSpirv(hlsl, spirv, error)) return false;
+    legacyArithmetic(spirv);
     return spirvToMsl(std::move(spirv), out, error);
 }
 

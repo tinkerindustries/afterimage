@@ -37,6 +37,8 @@ int main() {
     check("uniform in a static const", ShaderStage::WARP, "static const float k = q7, m = 2.0*q8;", "ret = k*m;");
     check("declaration after a #define", ShaderStage::COMP, "#define sat saturate\nfloat a, b;", "a = 1; b = a; ret = sat(b).xxx;");
     check("comp uv_orig aliases uv", ShaderStage::COMP, "", "uv = 0.5; ret = tex2D(sampler_main, uv_orig).xyz;");
+    check("division and normalize", ShaderStage::COMP, "",
+          "float2 z = (uv - 0.5)*aspect.xy; float2 m = z / dot(z, z); ret.xy = normalize(m) * (z.x / z.y); ret.z = 0.5 * (1.0 / length(z));");
     check("rot matrices", ShaderStage::COMP, "", "ret = mul(float4(uv, 0, 1), rot_s1);");
 
     std::printf("%d failures\n", failures);
