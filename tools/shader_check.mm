@@ -105,7 +105,7 @@ int main(int argc, char** argv) {
                 if (!translateShader(s == 0 ? ShaderStage::WARP : ShaderStage::COMP, *code[s], shader, error)) {
                     allOk = false;
                     ++translateErrors[firstErrorLine(error)];
-                    if (verbose) std::printf("HLSL %s %s: %s\n", s == 0 ? "warp" : "comp", path.filename().c_str(), firstErrorLine(error).c_str());
+                    if (verbose) std::printf("HLSL %s %s: %s\n", s == 0 ? "warp" : "comp", path.c_str(), firstErrorLine(error).c_str());
                     if (dump) std::printf("%s\n", error.c_str());
                     continue;
                 }
@@ -125,7 +125,7 @@ int main(int argc, char** argv) {
                     allOk = false;
                     const std::string log = nsError.localizedDescription.UTF8String;
                     ++compileErrors[firstErrorLine(log)];
-                    if (verbose) std::printf("MSL  %s %s: %s\n", s == 0 ? "warp" : "comp", path.filename().c_str(), firstErrorLine(log).c_str());
+                    if (verbose) std::printf("MSL  %s %s: %s\n", s == 0 ? "warp" : "comp", path.c_str(), firstErrorLine(log).c_str());
                     if (dump) std::printf("%s\n", log.c_str());
                     continue;
                 }
