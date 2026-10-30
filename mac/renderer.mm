@@ -1205,7 +1205,9 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:feedbackPass];
 
     if (gpu != nullptr && gpu->hasWarp()) {
-        gpu->bindWarp(encoder, front, m_blur, f.wrap, values);
+        // A shader's unprefixed sampler_main always wraps in MilkDrop; the preset's wrap flag only
+        // governs the fixed-function warp.
+        gpu->bindWarp(encoder, front, m_blur, true, values);
     } else {
         // MilkDrop passes the decay to the warp as a vertex colour byte, so it is cut to 1/255 steps
         // and wraps above 1: decay = 9.83 acts as 0.79.
@@ -1251,7 +1253,7 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
         if (gpu != nullptr && gpu->hasComp()) {
             float corners[16];
             [self hueCorners:corners classic:NO];
-            gpu->bindComp(composite, back, m_blur, f.wrap, values);
+            gpu->bindComp(composite, back, m_blur, true, values);
             [composite setVertexBuffer:m_compGrid offset:0 atIndex:0];
             [composite setVertexBytes:corners length:sizeof(corners) atIndex:1];
             [composite drawIndexedPrimitives:MTLPrimitiveTypeTriangle
