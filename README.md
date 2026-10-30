@@ -47,7 +47,7 @@ The feedback image is the window's size in points, not Retina pixels, which is w
 Launch it with `open build/Afterimage.app`. Keys:
 
 - `N` and `P`: next and previous preset
-- `Cmd+L`, or Presets > Preset List…: a window listing every preset under `presets/`, as a list or a gallery (the buttons beside the filter). Type to filter, then double-click a preset or press Return to play it. The gallery's thumbnails are this app's own renders, 4 s into each preset at 256 by 256. They render in the background the first time the gallery opens, about two a second, and are cached in `~/Library/Caches/com.geoffrich.milk/thumbnails` until a preset file changes. The playing preset is marked and the list follows it when it changes. Presets > Next Preset and Previous Preset (`Cmd+]` and `Cmd+[`) step through the same list.
+- `Cmd+L`, or Presets > Preset List…: a window listing every preset under `presets/`, as a list or a gallery (the buttons beside the filter). Type to filter, then double-click a preset or press Return to play it. The gallery's thumbnails are this app's own renders, 4 s into each preset at 256 by 256. They render in the background the first time the gallery opens, about two a second, and are cached in `~/Library/Caches/com.tinkerindustries.afterimage/thumbnails` until a preset file changes. The playing preset is marked and the list follows it when it changes. Presets > Next Preset and Previous Preset (`Cmd+]` and `Cmd+[`) step through the same list.
 - `Cmd+,`, or Afterimage > Settings…: a window to choose the audio device and to clear the thumbnail cache or open its folder in Finder. The app plays no sound. It listens to what plays through the chosen output device, or through the system default, and the choice persists. Changing it restarts the listening unless an audio file or the synthesiser is in use. Clearing it restarts the rendering if the gallery is open. Nothing else deletes thumbnails, so a changed preset leaves its old thumbnail behind until the cache is cleared.
 - `1` to `5`: built-in motion (still, pulse, sway, storm, ripple)
 - `W`: next wave mode
@@ -57,7 +57,7 @@ Launch it with `open build/Afterimage.app`. Keys:
 - `L`: lock the preset, which stops automatic changes
 - `H`: hard cuts on or off
 - `Space`: clear the image
-- `F`: full screen, and `Esc` to leave it
+- `F`, or a double-click on the visuals: full screen, and `Esc` to leave it
 
 ## Presets
 

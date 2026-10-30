@@ -13,6 +13,11 @@
 
 - (BOOL)acceptsFirstResponder { return YES; }
 
+- (void)mouseDown:(NSEvent*)event {
+    if (event.clickCount == 2) [self.window toggleFullScreen:nil];
+    else [super mouseDown:event];
+}
+
 - (void)keyDown:(NSEvent*)event {
     NSString* key = event.charactersIgnoringModifiers.lowercaseString;
     if (key.length == 0) return;

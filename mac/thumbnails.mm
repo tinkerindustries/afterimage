@@ -31,7 +31,7 @@ constexpr int VERSION = 1;
 
 + (NSString*)cacheDirectory {
     NSURL* caches = [NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
-    NSString* dir = [[caches.path stringByAppendingPathComponent:@"com.geoffrich.milk"] stringByAppendingPathComponent:@"thumbnails"];
+    NSString* dir = [[caches.path stringByAppendingPathComponent:@"com.tinkerindustries.afterimage"] stringByAppendingPathComponent:@"thumbnails"];
     [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     return dir;
 }
