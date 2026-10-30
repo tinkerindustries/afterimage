@@ -90,11 +90,20 @@ add_executable(milk_preset_check
   src/milk_audio.cpp)
 target_include_directories(milk_preset_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+add_executable(milk_expr_test tools/expr_test.cpp src/milk_expr.cpp)
+target_include_directories(milk_expr_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+enable_testing()
+add_test(NAME expressions COMMAND milk_expr_test)
+
 add_library(milk_shader STATIC src/milk_shader.cpp)
 target_include_directories(milk_shader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # glslang hides its HLSL options unless the including code defines this too.
 target_compile_definitions(milk_shader PRIVATE ENABLE_HLSL)
 target_link_libraries(milk_shader PUBLIC glslang SPIRV glslang-default-resource-limits spirv-cross-msl)
+
+add_executable(milk_shader_test tools/shader_test.cpp)
+target_link_libraries(milk_shader_test PRIVATE milk_shader)
+add_test(NAME shader_translation COMMAND milk_shader_test)
 
 if(APPLE)
   add_executable(milk_shader_check

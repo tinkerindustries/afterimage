@@ -60,7 +60,7 @@ The app reads `.milk` files from `presets/` and image textures from `presets/tex
 
 Each preset's base values and equations drive the same mesh warp as the built-in motions. Presets run at 60 Hz, one equation step per frame, as in MilkDrop. Equation lines are joined with nothing between them after each line's `//` comment is removed, as MilkDrop does. MilkDrop's editor broke some names across lines (`is_` then `beat`), and a line that ends without a `;` runs into the next, so the statement it makes fails to compile and is dropped.
 
-A frame runs in MilkDrop 2's order: motion vectors drawn onto the previous image, the warp (the preset's warp shader if it has one), custom shapes, custom waves, the main waveform, darken-centre, the outer and inner borders, three blur levels, then the comp shader. Custom waves read a 480-sample waveform and a 512-bin spectrum per channel, built by `src/milk_audio.cpp`. `src/milk_wave.cpp` draws the main waveform in MilkDrop's eight modes, with its scaling, smoothing and alpha rules. Lines are one pixel of the feedback image, and thick ones are drawn four times one pixel apart. Custom wave dots are one pixel below a 1024 pixel image and two from there up, plus one when thick. The placement of all of these follows projectM's reimplementation of MilkDrop.
+A frame runs in MilkDrop 2's order: motion vectors drawn onto the previous image, the warp (the preset's warp shader if it has one), custom shapes, custom waves, the main waveform, darken-centre, the outer and inner borders, three blur levels, then the comp shader. Custom waves read a 480-sample waveform and a 512-bin spectrum per channel, built by `src/milk_audio.cpp`. `src/milk_wave.cpp` draws the main waveform in MilkDrop's eight modes, with its scaling, smoothing and alpha rules. Lines are one pixel of the feedback image, and thick ones are drawn four times one pixel apart on an image 512 or more pixels wide. Custom wave dots are one pixel below a 1024 pixel image and two from there up, plus one when thick. The placement of all of these follows projectM's reimplementation of MilkDrop.
 
 `bass`, `mid` and `treb` follow MilkDrop 2's sound analysis (`mac/band_levels.cpp`): the spectrum of the latest 576 left-channel samples is summed into bins 0-85, 85-170 and 170-256, and each sum is divided by its slow average. The `_att` values divide the fast average by the same slow average. The equations' `time` and `frame` run from the start of the session, and a shader's `time` counts from the preset's load. The blur follows MilkDrop's: a wide horizontal pass, a short vertical pass, textures a quarter, an eighth and a sixteenth of the image's width, and edge darkening on the first level only.
 
@@ -76,12 +76,15 @@ The composite follows the preset's `PSVERSION_COMP` (MilkDrop 1 files count as 0
 
 The window title says when a preset has shader or equation code that failed to compile.
 
-Three tools work on presets:
+These tools work on presets:
 
 - `build/milk_preset_check presets` runs every preset's equations for 300 frames and reports code that fails to compile and output that goes non-finite.
 - `build/milk_shader_check presets` translates every shader, compiles it as Metal and links it against the app's vertex stages, then counts what got through each step.
 
 - `build/milk_render [--audio <file> [--audio-start <seconds>]] [--black-start] [--frames <dir> --root <dir>] <sheet.png> <seconds> <size> <preset.milk>...` renders each preset offscreen on the synthesiser, or on the same stretch of an audio file when `--audio` is given (any format Core Audio reads; `tools/make_sweep.py` writes a 30 s sine sweep for it). `--black-start` begins from a black image instead of noise, and `--frames` also writes each frame as a PNG named after the preset's path under `--root`. It writes a contact sheet with MilkDrop's preview (the `.jpg` beside the `.milk`, where there is one) on the left and this renderer's frame on the right.
+
+- `python3 tools/compare_frames.py <reference dir> <our dir> <out dir>` ranks how far this renderer's frames are from MilkDrop captures of the same presets and writes contact sheets of the biggest differences. `docs/capture-shortlist.txt` lists the presets chosen for capture, and `tools/make_sweep.py` writes the test audio.
+- `ctest --test-dir build` runs `milk_expr_test` (expression semantics) and `milk_shader_test` (the HLSL rewrites).
 
 Add `-v` to either check to list each failing preset. `milk_shader_check <file.milk> --dump` prints one preset's generated Metal, its uniform offsets and its texture bindings, and `--hlsl` prints the HLSL that goes to glslang.
 

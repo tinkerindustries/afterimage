@@ -4,6 +4,8 @@
 //
 //   milk_render [--audio <file> [--audio-start <seconds>]] [--black-start] [--frames <dir> --root <dir>] <sheet.png> <seconds> <size> <preset.milk>...
 //
+// <size> is a pixel count for a square image, or WIDTHxHEIGHT.
+//
 // With --audio every preset hears the same stretch of the file (any format Core Audio reads),
 // starting at --audio-start, in place of the synthesiser. --black-start begins from a black image
 // instead of noise, as a fresh MilkDrop process does. --frames <dir> --root <dir> also writes
@@ -25,6 +27,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -188,7 +191,9 @@ int main(int argc, char** argv) {
         NSString* outPath = @(argv[1]);
         const bool writeSheet = std::string(argv[1]) != "-";
         const int frames = std::max(1, static_cast<int>(std::atof(argv[2]) * 60.0));
-        const int size = std::max(16, std::atoi(argv[3]));
+        int sizeW = std::max(16, std::atoi(argv[3]));
+        int sizeH = sizeW;
+        if (const char* x = std::strchr(argv[3], 'x')) sizeH = std::max(16, std::atoi(x + 1));
         std::vector<std::string> presets(argv + 4, argv + argc);
 
         AudioClip clip;
@@ -201,8 +206,8 @@ int main(int argc, char** argv) {
         id<MTLCommandQueue> queue = [device newCommandQueue];
         NSString* source = [NSString stringWithContentsOfFile:@MILK_SOURCE_DIR "/mac/shaders.metal" encoding:NSUTF8StringEncoding error:nil];
         MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                                                                        width:size
-                                                                                       height:size
+                                                                                        width:sizeW
+                                                                                       height:sizeH
                                                                                     mipmapped:NO];
         desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
         desc.storageMode = MTLStorageModeShared;
@@ -241,7 +246,7 @@ int main(int argc, char** argv) {
             }
             for (int f = 0; f < frames; ++f) {
                 id<MTLCommandBuffer> commands = [queue commandBuffer];
-                [renderer renderFrame:1.0f / 60.0f internalSize:CGSizeMake(size, size) target:target commands:commands];
+                [renderer renderFrame:1.0f / 60.0f internalSize:CGSizeMake(sizeW, sizeH) target:target commands:commands];
                 [commands commit];
                 if (f % 30 == 29 || f == frames - 1) [commands waitUntilCompleted];
             }

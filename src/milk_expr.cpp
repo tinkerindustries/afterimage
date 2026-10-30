@@ -186,7 +186,8 @@ double ExprNode::eval() const {
     case Kind::Rand: {
         const double x = kids[0]->eval();
         const double r = nextRand(vars->globals());
-        return x >= 1.0 ? std::floor(r * std::floor(x)) : r * x;
+        // "A random integer modulo x": rand(4) is 0, 1, 2 or 3, and rand of anything under 1 is 0.
+        return x >= 1.0 ? std::floor(r * std::floor(x)) : 0.0;
     }
     }
     return 0.0;

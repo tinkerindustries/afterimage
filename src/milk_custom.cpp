@@ -225,7 +225,7 @@ void CustomShape::loadState(const CustomFrameInputs& in, int instance) {
     v.set("border_r", setting("border_r", 1.0));
     v.set("border_g", setting("border_g", 1.0));
     v.set("border_b", setting("border_b", 1.0));
-    v.set("border_a", setting("border_a", 0.0));
+    v.set("border_a", setting("border_a", 0.1));
 }
 
 void CustomShape::run(int index, const CustomFrameInputs& in, std::vector<CustomShapeInstance>& out) {

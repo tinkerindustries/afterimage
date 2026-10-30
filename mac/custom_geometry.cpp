@@ -144,7 +144,8 @@ void CustomGeometry::addWave(const CustomWaveOutput& wave) {
 void CustomGeometry::addMainWave(const MainWave& wave) {
     if (wave.a <= 0.0f) return;
     const float colour[4] = {wave.r, wave.g, wave.b, wave.a};
-    const int passes = (wave.thick || wave.dots) ? 4 : 1;
+    // MilkDrop redraws thick and dotted waves four times only on an image 512 or more pixels wide.
+    const int passes = ((wave.thick || wave.dots) && m_width >= 512) ? 4 : 1;
     const float offsets[4][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, -1.0f}, {0.0f, -1.0f}};
     startBatch(wave.additive, false, -1);
     for (const auto& line : wave.lines) {
