@@ -151,6 +151,7 @@ if(APPLE)
   add_executable(MilkMetal MACOSX_BUNDLE
     mac/main.mm
     mac/preset_list.mm
+    mac/thumbnails.mm
     ${MILK_METAL_SHADERS})
   set_target_properties(MilkMetal PROPERTIES
     OUTPUT_NAME Milk
@@ -159,7 +160,7 @@ if(APPLE)
     MACOSX_BUNDLE_EXECUTABLE_NAME Milk)
   target_compile_options(MilkMetal PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
   target_link_libraries(MilkMetal PRIVATE milk_mac)
-  add_executable(milk_preset_list_test tools/preset_list_test.mm mac/preset_list.mm)
+  add_executable(milk_preset_list_test tools/preset_list_test.mm mac/preset_list.mm mac/thumbnails.mm)
   target_compile_options(milk_preset_list_test PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
   target_link_libraries(milk_preset_list_test PRIVATE milk_mac)
   # The renderer reads shaders.metal from the main bundle, which for a bare executable is its folder.

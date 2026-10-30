@@ -562,6 +562,12 @@ NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
 
 - (NSArray<NSString*>*)presetNames { return m_presetNames ?: @[]; }
 
+- (NSArray<NSString*>*)presetPaths {
+    NSMutableArray<NSString*>* paths = [NSMutableArray arrayWithCapacity:m_presetPaths.size()];
+    for (const std::string& path : m_presetPaths) [paths addObject:@(path.c_str())];
+    return paths;
+}
+
 - (NSInteger)currentPresetIndex { return m_presetIndex; }
 
 - (void)selectPresetAtIndex:(NSInteger)index {

@@ -48,6 +48,8 @@ extern NSString* const MilkPresetDidChangeNotification;
 // Every preset the app can step through, named by its path under the presets folder without the
 // .milk extension, in stepping order.
 @property (nonatomic, readonly) NSArray<NSString*>* presetNames;
+// The .milk file of each entry in presetNames.
+@property (nonatomic, readonly) NSArray<NSString*>* presetPaths;
 // The index in presetNames of the preset playing now, or -1 when none has been chosen.
 @property (nonatomic, readonly) NSInteger currentPresetIndex;
 - (void)selectPresetAtIndex:(NSInteger)index;
