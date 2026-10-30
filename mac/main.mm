@@ -1,5 +1,6 @@
 #import "preset_list.h"
 #import "renderer.h"
+#import "settings.h"
 
 #import <Cocoa/Cocoa.h>
 #import <MetalKit/MetalKit.h>
@@ -42,6 +43,7 @@
 @property (nonatomic, strong) NSWindow* window;
 @property (nonatomic, strong) MilkView* view;
 @property (nonatomic, strong) PresetListController* presetList;
+@property (nonatomic, strong) SettingsController* settings;
 @end
 
 @implementation AppDelegate
@@ -51,10 +53,12 @@
     NSMenuItem* appItem = [NSMenuItem new];
     [menuBar addItem:appItem];
     NSMenu* appMenu = [NSMenu new];
+    [appMenu addItemWithTitle:@"Settings\u2026" action:@selector(showSettings:) keyEquivalent:@","];
+    [appMenu addItem:[NSMenuItem separatorItem]];
     [appMenu addItemWithTitle:@"Toggle Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask =
         NSEventModifierFlagCommand | NSEventModifierFlagControl;
     [appMenu addItem:[NSMenuItem separatorItem]];
-    [appMenu addItemWithTitle:@"Quit Milk" action:@selector(terminate:) keyEquivalent:@"q"];
+    [appMenu addItemWithTitle:@"Quit Afterimage" action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = appMenu;
     NSMenuItem* presetsItem = [NSMenuItem new];
     [menuBar addItem:presetsItem];
@@ -80,7 +84,7 @@
     self.view.renderer = [[MilkRenderer alloc] initWithView:self.view error:&error];
     if (self.view.renderer == nil) {
         NSAlert* alert = [NSAlert new];
-        alert.messageText = @"Milk could not start";
+        alert.messageText = @"Afterimage could not start";
         alert.informativeText = error ?: @"unknown error";
         [alert runModal];
         [NSApp terminate:nil];
@@ -88,6 +92,7 @@
     }
     self.view.delegate = self.view.renderer;
     self.presetList = [[PresetListController alloc] initWithRenderer:self.view.renderer];
+    self.settings = [[SettingsController alloc] initWithRenderer:self.view.renderer];
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(presetDidChange:)
                                                  name:MilkPresetDidChangeNotification
@@ -102,6 +107,8 @@
 }
 
 - (void)showPresetList:(id)sender { [self.presetList showWindow]; }
+
+- (void)showSettings:(id)sender { [self.settings showWindow]; }
 
 - (void)nextPreset:(id)sender { [self.view.renderer nextPreset]; }
 

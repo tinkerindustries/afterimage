@@ -38,16 +38,52 @@ NSString* defaultOutputUid(std::string& error) {
     return (__bridge_transfer NSString*)uid;
 }
 
+NSString* deviceString(AudioObjectID device, AudioObjectPropertySelector selector) {
+    CFStringRef value = nullptr;
+    UInt32 size = sizeof(value);
+    AudioObjectPropertyAddress address = globalAddress(selector);
+    if (AudioObjectGetPropertyData(device, &address, 0, nullptr, &size, &value) != noErr || value == nullptr) return nil;
+    return (__bridge_transfer NSString*)value;
+}
+
+bool hasOutput(AudioObjectID device) {
+    UInt32 size = 0;
+    AudioObjectPropertyAddress address{kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain};
+    return AudioObjectGetPropertyDataSize(device, &address, 0, nullptr, &size) == noErr && size > 0;
+}
+
 } // namespace
+
+std::vector<OutputDevice> listOutputDevices() {
+    std::vector<OutputDevice> result;
+    UInt32 size = 0;
+    AudioObjectPropertyAddress address = globalAddress(kAudioHardwarePropertyDevices);
+    if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &address, 0, nullptr, &size) != noErr) return result;
+    std::vector<AudioObjectID> devices(size / sizeof(AudioObjectID));
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &address, 0, nullptr, &size, devices.data()) != noErr) return result;
+    for (AudioObjectID device : devices) {
+        if (!hasOutput(device)) continue;
+        NSString* uid = deviceString(device, kAudioDevicePropertyDeviceUID);
+        NSString* name = deviceString(device, kAudioObjectPropertyName);
+        if (uid == nil || name == nil || [name isEqualToString:@"Milk system audio"]) continue;
+        result.push_back({uid.UTF8String, name.UTF8String});
+    }
+    return result;
+}
 
 SystemAudioTap::SystemAudioTap() : m_ringL(RING_SIZE, 0.0f), m_ringR(RING_SIZE, 0.0f) {}
 
 SystemAudioTap::~SystemAudioTap() { stop(); }
 
-bool SystemAudioTap::start(std::string& error) {
+bool SystemAudioTap::start(std::string& error, const std::string& deviceUid) {
     if (running()) return true;
 
-    CATapDescription* description = [[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:@[]];
+    NSString* chosenUid = nil;
+    for (const OutputDevice& device : listOutputDevices()) {
+        if (!deviceUid.empty() && device.uid == deviceUid) chosenUid = @(device.uid.c_str());
+    }
+    CATapDescription* description = chosenUid ? [[CATapDescription alloc] initExcludingProcesses:@[] andDeviceUID:chosenUid withStream:0]
+                                              : [[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:@[]];
     description.UUID = [NSUUID UUID];
     description.name = @"Milk system audio";
     description.privateTap = YES;
@@ -76,7 +112,7 @@ bool SystemAudioTap::start(std::string& error) {
     }
     m_sampleRate = format.mSampleRate;
 
-    NSString* outputUid = defaultOutputUid(error);
+    NSString* outputUid = chosenUid ?: defaultOutputUid(error);
     if (outputUid == nil) {
         stop();
         return false;

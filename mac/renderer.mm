@@ -201,6 +201,7 @@ struct OldPreset {
 } // namespace
 
 NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
+NSString* const MilkAudioDeviceKey = @"AudioDeviceUID";
 
 @implementation MilkRenderer {
     id<MTLDevice> m_device;
@@ -532,9 +533,16 @@ NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
     m_compIndices = [m_device newBufferWithBytes:indices.data() length:indices.size() * sizeof(uint16_t) options:MTLResourceStorageModeShared];
 }
 
+- (void)restartSystemAudio {
+    if (m_source != SOURCE_SYSTEM && m_tapError.empty()) return;
+    m_tap.stop();
+    [self startSystemAudio];
+}
+
 - (void)startSystemAudio {
     m_tapError.clear();
-    if (m_tap.start(m_tapError)) {
+    NSString* device = [NSUserDefaults.standardUserDefaults stringForKey:MilkAudioDeviceKey];
+    if (m_tap.start(m_tapError, device.length ? device.UTF8String : "")) {
         m_bands = std::make_unique<BandLevels>();
     m_bands->useMilkwaveBands(m_milkwave || std::getenv("MILK_BANDS") != nullptr);
         m_source = SOURCE_SYSTEM;
@@ -738,10 +746,10 @@ NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
         if (!m_player->errors().empty()) notes += ", code errors";
         if (m_presetLocked) notes += ", locked";
         if (m_hardCuts) notes += ", hard cuts";
-        return [NSString stringWithFormat:@"Milk: %s (%d/%zu%s), %s", m_player->name().c_str(), m_presetIndex + 1,
+        return [NSString stringWithFormat:@"Afterimage: %s (%d/%zu%s), %s", m_player->name().c_str(), m_presetIndex + 1,
                                           m_presetPaths.size(), notes.c_str(), audio.c_str()];
     }
-    return [NSString stringWithFormat:@"Milk: %s, %s wave, %s", MOTION_NAMES[m_params.motion].c_str(),
+    return [NSString stringWithFormat:@"Afterimage: %s, %s wave, %s", MOTION_NAMES[m_params.motion].c_str(),
                                       WAVE_MODE_NAMES[m_params.waveMode].c_str(), audio.c_str()];
 }
 

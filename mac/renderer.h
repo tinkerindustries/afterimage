@@ -7,6 +7,10 @@ NS_ASSUME_NONNULL_BEGIN
 // Posted on the default centre after a preset loads, whether by key, menu or the preset list.
 extern NSString* const MilkPresetDidChangeNotification;
 
+// The user-defaults key holding the UID of the output device to listen to. The default output
+// device is used when it is missing, empty or names a device that is not there.
+extern NSString* const MilkAudioDeviceKey;
+
 @interface MilkRenderer : NSObject <MTKViewDelegate>
 
 // For the window: reads shaders.metal from the app bundle, finds the presets and listens to
@@ -31,6 +35,9 @@ extern NSString* const MilkPresetDidChangeNotification;
 // Encodes one frame of `dt` seconds with a feedback image of `size` pixels, composited into
 // `target` (a texture in the output format).
 - (void)renderFrame:(float)dt internalSize:(CGSize)size target:(id<MTLTexture>)target commands:(id<MTLCommandBuffer>)commands;
+
+// Starts listening again with the saved device, unless an audio file or the synthesiser was chosen.
+- (void)restartSystemAudio;
 
 - (void)setMotion:(int)motion;
 - (void)nextPreset;

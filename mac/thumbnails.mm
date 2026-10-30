@@ -9,6 +9,7 @@
 #include <string>
 
 NSString* const MilkThumbnailDidRenderNotification = @"MilkThumbnailDidRender";
+NSString* const MilkThumbnailCacheDidClearNotification = @"MilkThumbnailCacheDidClear";
 
 namespace {
 
@@ -28,6 +29,37 @@ constexpr int VERSION = 1;
     BOOL m_started;
 }
 
++ (NSString*)cacheDirectory {
+    NSURL* caches = [NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
+    NSString* dir = [[caches.path stringByAppendingPathComponent:@"com.geoffrich.milk"] stringByAppendingPathComponent:@"thumbnails"];
+    [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    return dir;
+}
+
++ (void)clearCache {
+    NSString* dir = [self cacheDirectory];
+    for (NSString* name in [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil]) {
+        if ([name.pathExtension isEqualToString:@"png"]) {
+            [NSFileManager.defaultManager removeItemAtPath:[dir stringByAppendingPathComponent:name] error:nil];
+        }
+    }
+    [[NSNotificationCenter defaultCenter] postNotificationName:MilkThumbnailCacheDidClearNotification object:nil];
+}
+
++ (NSString*)cacheSummary {
+    NSString* dir = [self cacheDirectory];
+    NSUInteger count = 0;
+    unsigned long long bytes = 0;
+    for (NSString* name in [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil]) {
+        if (![name.pathExtension isEqualToString:@"png"]) continue;
+        ++count;
+        bytes += [NSFileManager.defaultManager attributesOfItemAtPath:[dir stringByAppendingPathComponent:name] error:nil].fileSize;
+    }
+    return [NSString stringWithFormat:@"%lu thumbnails, %@", (unsigned long)count,
+                                      [NSByteCountFormatter stringFromByteCount:static_cast<long long>(bytes)
+                                                                     countStyle:NSByteCountFormatterCountStyleFile]];
+}
+
 - (instancetype)initWithPresetPaths:(NSArray<NSString*>*)paths {
     if ((self = [super init])) {
         m_paths = [paths copy];
@@ -36,9 +68,7 @@ constexpr int VERSION = 1;
         m_ready = [NSMutableIndexSet indexSet];
         m_queue = dispatch_queue_create("milk.thumbnails", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
 
-        NSURL* caches = [NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
-        NSString* dir = [[caches.path stringByAppendingPathComponent:@"com.geoffrich.milk"] stringByAppendingPathComponent:@"thumbnails"];
-        [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        NSString* dir = [ThumbnailStore cacheDirectory];
         NSMutableArray<NSString*>* files = [NSMutableArray arrayWithCapacity:paths.count];
         for (NSUInteger i = 0; i < paths.count; ++i) {
             NSDictionary* attributes = [NSFileManager.defaultManager attributesOfItemAtPath:paths[i] error:nil];

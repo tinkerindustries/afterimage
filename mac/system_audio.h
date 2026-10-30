@@ -9,6 +9,14 @@
 
 namespace Milk {
 
+struct OutputDevice {
+    std::string uid;
+    std::string name;
+};
+
+// The audio devices that can play sound, in the system's order.
+std::vector<OutputDevice> listOutputDevices();
+
 // Captures everything the Mac is playing through a Core Audio process tap and hands it over as
 // left and right samples. The audio thread writes into a ring and the render thread drains it.
 class SystemAudioTap {
@@ -16,7 +24,9 @@ public:
     SystemAudioTap();
     ~SystemAudioTap();
 
-    bool start(std::string& error);
+    // Listens to what plays through the output device with `deviceUid`, or through the default output
+    // device when it is empty or names a device that is not there.
+    bool start(std::string& error, const std::string& deviceUid = "");
     void stop();
     bool running() const { return m_proc != nullptr; }
     double sampleRate() const { return m_sampleRate; }

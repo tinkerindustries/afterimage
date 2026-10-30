@@ -151,13 +151,14 @@ if(APPLE)
   add_executable(MilkMetal MACOSX_BUNDLE
     mac/main.mm
     mac/preset_list.mm
+    mac/settings.mm
     mac/thumbnails.mm
     ${MILK_METAL_SHADERS})
   set_target_properties(MilkMetal PROPERTIES
-    OUTPUT_NAME Milk
+    OUTPUT_NAME Afterimage
     MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/mac/Info.plist.in
     MACOSX_BUNDLE_GUI_IDENTIFIER com.geoffrich.milk
-    MACOSX_BUNDLE_EXECUTABLE_NAME Milk)
+    MACOSX_BUNDLE_EXECUTABLE_NAME Afterimage)
   target_compile_options(MilkMetal PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
   target_link_libraries(MilkMetal PRIVATE milk_mac)
   add_executable(milk_preset_list_test tools/preset_list_test.mm mac/preset_list.mm mac/thumbnails.mm)

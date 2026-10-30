@@ -1,4 +1,4 @@
-# milk-experimental-effects
+# Afterimage
 
 Experiments with MilkDrop and Geiss style feedback visualisers, built as a Turret effect on the SDL3 backend.
 
@@ -38,16 +38,17 @@ The first configure fetches SDL3, SDL3_image, SDL3_ttf, glslang and SPIRV-Cross 
 
 ## The Metal app
 
-`build/Milk.app` is a standalone macOS app that runs the same effect on the GPU at up to 120 Hz. It needs macOS 14.2 or later. It listens to everything the Mac is playing through a Core Audio process tap, in stereo, so it follows Spotify or any other player. macOS asks for permission to record system audio on the first launch, and again after each rebuild, because the ad-hoc signature changes. If the tap cannot start, the app falls back to the synthesiser.
+`build/Afterimage.app` is a standalone macOS app that runs the same effect on the GPU at up to 120 Hz. It needs macOS 14.2 or later. It listens to everything the Mac is playing through a Core Audio process tap, in stereo, so it follows Spotify or any other player. macOS asks for permission to record system audio on the first launch, and again after each rebuild, because the ad-hoc signature changes. If the tap cannot start, the app falls back to the synthesiser.
 
 The CPU still computes the 64x48-cell warp mesh with `computeMesh`. The GPU resamples the previous frame through it, adds the waveform, and scales the result by `gamma_adj` for the screen. The built-in motions' equations are written for 60 Hz, so the app scales each frame's displacement and decay by the frame's length.
 
 The feedback image is the window's size in points, not Retina pixels, which is what MilkDrop would have rendered in a window of the same physical size on a non-Retina screen. Presets measure offsets, blur widths and line widths in pixels, so this keeps them at the scale their authors saw. The feedback and blur images are 8 bits per channel, as MilkDrop's are, so increments below 1/255 vanish and some presets depend on that. Each frame ends with the image clamped to 0..1 (NaN becomes 0).
 
-Launch it with `open build/Milk.app`. Keys:
+Launch it with `open build/Afterimage.app`. Keys:
 
 - `N` and `P`: next and previous preset
 - `Cmd+L`, or Presets > Preset List…: a window listing every preset under `presets/`, as a list or a gallery (the buttons beside the filter). Type to filter, then double-click a preset or press Return to play it. The gallery's thumbnails are this app's own renders, 4 s into each preset at 256 by 256. They render in the background the first time the gallery opens, about two a second, and are cached in `~/Library/Caches/com.geoffrich.milk/thumbnails` until a preset file changes. The playing preset is marked and the list follows it when it changes. Presets > Next Preset and Previous Preset (`Cmd+]` and `Cmd+[`) step through the same list.
+- `Cmd+,`, or Afterimage > Settings…: a window to choose the audio device and to clear the thumbnail cache or open its folder in Finder. The app plays no sound. It listens to what plays through the chosen output device, or through the system default, and the choice persists. Changing it restarts the listening unless an audio file or the synthesiser is in use. Clearing it restarts the rendering if the gallery is open. Nothing else deletes thumbnails, so a changed preset leaves its old thumbnail behind until the cache is cleared.
 - `1` to `5`: built-in motion (still, pulse, sway, storm, ripple)
 - `W`: next wave mode
 - `C`: colour cycling on or off

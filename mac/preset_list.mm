@@ -191,6 +191,10 @@ constexpr CGFloat THUMB_SIZE = 152;
                                                  selector:@selector(thumbnailDidRender:)
                                                      name:MilkThumbnailDidRenderNotification
                                                    object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(thumbnailCacheDidClear:)
+                                                     name:MilkThumbnailCacheDidClearNotification
+                                                   object:nil];
     }
     return self;
 }
@@ -379,6 +383,18 @@ constexpr CGFloat THUMB_SIZE = 152;
     if (m_galleryScroll.hidden) return;
     const NSInteger row = [self rowForPresetIndex:[note.userInfo[@"index"] integerValue]];
     if (row >= 0) [m_gallery reloadItemsAtIndexPaths:[NSSet setWithObject:[NSIndexPath indexPathForItem:row inSection:0]]];
+}
+
+// Drops the store, which stops its rendering, and starts a new one if the gallery is showing.
+- (void)thumbnailCacheDidClear:(NSNotification*)note {
+    m_thumbnails = nil;
+    if (m_panel == nil) return;
+    if (!m_galleryScroll.hidden) {
+        m_thumbnails = [[ThumbnailStore alloc] initWithPresetPaths:m_renderer.presetPaths];
+        [m_thumbnails start];
+        [m_gallery reloadData];
+    }
+    [self updateCount];
 }
 
 - (NSInteger)rowForPresetIndex:(NSInteger)index {
