@@ -1,4 +1,0 @@
-commands:
-  - name: Build
-    command: cmake --build build
-    reload: true
