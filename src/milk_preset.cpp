@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <regex>
 #include <fstream>
 
 namespace Milk {
@@ -56,9 +57,11 @@ const std::map<std::string, double> DEFAULTS = {
     {"wave_mode", 0.0}, {"wave_x", 0.5}, {"wave_y", 0.5}, {"wave_r", 1.0}, {"wave_g", 1.0},
     {"wave_b", 1.0}, {"wave_a", 0.8}, {"wave_scale", 1.0}, {"wave_thick", 0.0},
     {"wave_brighten", 1.0}, {"warpanimspeed", 1.0}, {"warpscale", 1.0}, {"wrap", 1.0},
-    {"echo_zoom", 1.0}, {"echo_alpha", 0.0}, {"echo_orient", 0.0}, {"brighten", 0.0}, {"darken", 0.0},
+    {"echo_zoom", 2.0}, {"echo_alpha", 0.0}, {"echo_orient", 0.0}, {"brighten", 0.0}, {"darken", 0.0},
     {"solarize", 0.0}, {"invert", 0.0}, {"blur1_min", 0.0}, {"blur1_max", 1.0}, {"blur2_min", 0.0}, {"blur2_max", 1.0},
     {"blur3_min", 0.0}, {"blur3_max", 1.0}, {"blur1_edge_darken", 0.25},
+    {"ob_size", 0.01}, {"ib_size", 0.01}, {"ib_r", 0.25}, {"ib_g", 0.25}, {"ib_b", 0.25},
+    {"mv_x", 12.0}, {"mv_y", 9.0}, {"mv_l", 0.9}, {"mv_r", 1.0}, {"mv_g", 1.0}, {"mv_b", 1.0}, {"mv_a", 0.0},
 };
 
 const char* VERTEX_VARS[] = {"zoom", "zoomexp", "rot", "warp", "cx", "cy", "dx", "dy", "sx", "sy"};
@@ -83,6 +86,21 @@ std::string joinLines(const std::map<int, std::string>& lines) {
     for (const auto& [index, text] : lines) {
         out += text;
         out += '\n';
+    }
+    return out;
+}
+
+// Equation code is stored one editor line per key. MilkDrop strips each line's // comment and joins
+// the lines with nothing between them, so a name its editor broke across two lines (`is_` then
+// `beat`) is whole again. A line that ends without ';' runs into the next one, and the statement
+// that makes fails to compile and is dropped, as it is in MilkDrop.
+std::string joinEquationLines(const std::map<int, std::string>& lines) {
+    std::string out;
+    for (const auto& [index, text] : lines) {
+        std::string line = text;
+        if (!line.empty() && line[0] == '`') line.erase(0, 1);
+        line = line.substr(0, std::min(line.find("//"), line.find("\\\\")));
+        out += line;
     }
     return out;
 }
@@ -195,9 +213,9 @@ bool loadPresetFile(const std::string& path, PresetFile& out, std::string& error
             out.base[alias == KEY_TO_VAR.end() ? key : alias->second] = number;
         }
     }
-    out.perFrameInit = joinLines(perFrameInit);
-    out.perFrame = joinLines(perFrame);
-    out.perPixel = joinLines(perPixel);
+    out.perFrameInit = joinEquationLines(perFrameInit);
+    out.perFrame = joinEquationLines(perFrame);
+    out.perPixel = joinEquationLines(perPixel);
     out.warpShader = joinLines(warp);
     out.compShader = joinLines(comp);
     auto version = [&](const char* key, int fallback) {
@@ -215,11 +233,11 @@ bool loadPresetFile(const std::string& path, PresetFile& out, std::string& error
         out.compVersion = version("psversion_comp", 2);
     }
     for (int i = 0; i < CUSTOM_COUNT; ++i) {
-        out.waves[i].init = joinLines(waveCode[i].init);
-        out.waves[i].perFrame = joinLines(waveCode[i].perFrame);
-        out.waves[i].perPoint = joinLines(waveCode[i].perPoint);
-        out.shapes[i].init = joinLines(shapeCode[i].init);
-        out.shapes[i].perFrame = joinLines(shapeCode[i].perFrame);
+        out.waves[i].init = joinEquationLines(waveCode[i].init);
+        out.waves[i].perFrame = joinEquationLines(waveCode[i].perFrame);
+        out.waves[i].perPoint = joinEquationLines(waveCode[i].perPoint);
+        out.shapes[i].init = joinEquationLines(shapeCode[i].init);
+        out.shapes[i].perFrame = joinEquationLines(shapeCode[i].perFrame);
     }
     return true;
 }
@@ -269,12 +287,13 @@ void PresetPlayer::setReadOnly(VarTable& vars, const AudioLevels& audio, float t
     vars.set("bass_att", audio.bassAtt);
     vars.set("mid_att", audio.midAtt);
     vars.set("treb_att", audio.trebAtt);
-    vars.set("meshx", MESH_X);
-    vars.set("meshy", MESH_Y);
+    vars.set("meshx", MESH_X - 1);
+    vars.set("meshy", MESH_Y - 1);
     vars.set("pixelsx", width);
     vars.set("pixelsy", height);
-    vars.set("aspectx", aspectX);
-    vars.set("aspecty", aspectY);
+    // MilkDrop reports the inverses: 1 on the short side, and the aspect ratio on the long one.
+    vars.set("aspectx", 1.0f / aspectX);
+    vars.set("aspecty", 1.0f / aspectY);
 }
 
 FrameVars PresetPlayer::runFrame(const AudioLevels& audio, float time, float fps, int width, int height) {

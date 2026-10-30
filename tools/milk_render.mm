@@ -2,7 +2,12 @@
 // (the .jpg beside the .milk) next to this project's frame after the given number of seconds.
 // Audio comes from the synthesiser, so a run is repeatable.
 //
-//   milk_render <sheet.png> <seconds> <size> <preset.milk>...
+//   milk_render [--audio <file> [--audio-start <seconds>]] [--black-start] [--frames <dir> --root <dir>] <sheet.png> <seconds> <size> <preset.milk>...
+//
+// With --audio every preset hears the same stretch of the file (any format Core Audio reads),
+// starting at --audio-start, in place of the synthesiser. --black-start begins from a black image
+// instead of noise, as a fresh MilkDrop process does. --frames <dir> --root <dir> also writes
+// each preset's frame to <dir>/<path under root, extension dropped, '/' as '__'>.png.
 //
 // Each preset's line on stdout ends with the frame's mean brightness, its contrast (standard
 // deviation of brightness) and its mean colour saturation, all 0..1. Pass "-" as the sheet to
@@ -12,6 +17,7 @@
 
 #import <CoreText/CoreText.h>
 #import <Foundation/Foundation.h>
+#import <AudioToolbox/AudioToolbox.h>
 #import <ImageIO/ImageIO.h>
 #import <Metal/Metal.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -21,6 +27,10 @@
 #include <cstdio>
 #include <string>
 #include <vector>
+
+#include "audio_synth.h"
+
+using Milk::SAMPLE_RATE;
 
 namespace {
 
@@ -90,19 +100,102 @@ void drawLabel(CGContextRef context, NSString* text, CGFloat x, CGFloat y) {
     CFRelease(line);
 }
 
+
+struct AudioClip {
+    std::vector<float> left, right;
+    size_t start = 0;
+};
+
+// Decodes `seconds` of the file from `startSeconds`, preceded by up to two seconds of lead-in,
+// as 48 kHz stereo floats. A mono file fills both channels.
+bool loadAudio(const char* path, double startSeconds, double seconds, AudioClip& out) {
+    ExtAudioFileRef file = nullptr;
+    if (ExtAudioFileOpenURL((__bridge CFURLRef)[NSURL fileURLWithPath:@(path)], &file) != noErr) return false;
+    AudioStreamBasicDescription format = {};
+    format.mSampleRate = SAMPLE_RATE;
+    format.mFormatID = kAudioFormatLinearPCM;
+    format.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+    format.mChannelsPerFrame = 2;
+    format.mBitsPerChannel = 32;
+    format.mBytesPerFrame = 8;
+    format.mFramesPerPacket = 1;
+    format.mBytesPerPacket = 8;
+    if (ExtAudioFileSetProperty(file, kExtAudioFileProperty_ClientDataFormat, sizeof(format), &format) != noErr) {
+        ExtAudioFileDispose(file);
+        return false;
+    }
+    const double lead = std::min(startSeconds, 2.0);
+    const SInt64 from = static_cast<SInt64>((startSeconds - lead) * SAMPLE_RATE);
+    if (ExtAudioFileSeek(file, from) != noErr) {
+        ExtAudioFileDispose(file);
+        return false;
+    }
+    const size_t wanted = static_cast<size_t>((lead + seconds) * SAMPLE_RATE);
+    std::vector<float> interleaved(wanted * 2);
+    size_t got = 0;
+    while (got < wanted) {
+        UInt32 frames = static_cast<UInt32>(std::min<size_t>(wanted - got, 16384));
+        AudioBufferList list;
+        list.mNumberBuffers = 1;
+        list.mBuffers[0].mNumberChannels = 2;
+        list.mBuffers[0].mDataByteSize = frames * 8;
+        list.mBuffers[0].mData = interleaved.data() + got * 2;
+        if (ExtAudioFileRead(file, &frames, &list) != noErr || frames == 0) break;
+        got += frames;
+    }
+    ExtAudioFileDispose(file);
+    if (got == 0) return false;
+    out.left.assign(wanted, 0.0f);
+    out.right.assign(wanted, 0.0f);
+    for (size_t i = 0; i < got; ++i) {
+        out.left[i] = interleaved[i * 2];
+        out.right[i] = interleaved[i * 2 + 1];
+    }
+    out.start = static_cast<size_t>(lead * SAMPLE_RATE);
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     @autoreleasepool {
-        if (argc < 5) {
-            std::fprintf(stderr, "usage: %s <sheet.png> <seconds> <size> <preset.milk>...\n", argv[0]);
+        const char* audioPath = nullptr;
+        double audioStart = 0.0;
+        bool blackStart = false;
+        std::string framesDir, rootDir;
+        int first = 1;
+        while (first < argc && (std::string(argv[first]) == "--black-start" ||
+                                (first + 1 < argc && (std::string(argv[first]).rfind("--audio", 0) == 0 ||
+                                                      std::string(argv[first]) == "--frames" || std::string(argv[first]) == "--root")))) {
+            if (std::string(argv[first]) == "--black-start") {
+                blackStart = true;
+                first += 1;
+                continue;
+            }
+            if (std::string(argv[first]) == "--frames") framesDir = argv[first + 1];
+            else if (std::string(argv[first]) == "--root") rootDir = argv[first + 1];
+            else if (std::string(argv[first]) == "--audio") audioPath = argv[first + 1];
+            else if (std::string(argv[first]) == "--audio-start") audioStart = std::atof(argv[first + 1]);
+            else break;
+            first += 2;
+        }
+        if (argc - first < 4) {
+            std::fprintf(stderr, "usage: %s [--audio <file> [--audio-start <seconds>]] [--black-start] [--frames <dir> --root <dir>] <sheet.png> <seconds> <size> <preset.milk>...\n", argv[0]);
             return 2;
         }
+        argv += first - 1;
+        argc -= first - 1;
         NSString* outPath = @(argv[1]);
         const bool writeSheet = std::string(argv[1]) != "-";
         const int frames = std::max(1, static_cast<int>(std::atof(argv[2]) * 60.0));
         const int size = std::max(16, std::atoi(argv[3]));
         std::vector<std::string> presets(argv + 4, argv + argc);
+
+        AudioClip clip;
+        if (audioPath != nullptr && !loadAudio(audioPath, audioStart, frames / 60.0 + 1.0, clip)) {
+            std::fprintf(stderr, "could not read audio from %s at %.1f s\n", audioPath, audioStart);
+            return 1;
+        }
 
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         id<MTLCommandQueue> queue = [device newCommandQueue];
@@ -142,7 +235,10 @@ int main(int argc, char** argv) {
             }
             // In MilkDrop a preset starts from the previous preset's image. Noise stands in for it,
             // so presets that only transform what is already there have something to work on.
-            [renderer seedNoise];
+            if (!blackStart) [renderer seedNoise];
+            if (audioPath != nullptr) {
+                [renderer useAudioLeft:clip.left.data() right:clip.right.data() count:clip.left.size() start:clip.start];
+            }
             for (int f = 0; f < frames; ++f) {
                 id<MTLCommandBuffer> commands = [queue commandBuffer];
                 [renderer renderFrame:1.0f / 60.0f internalSize:CGSizeMake(size, size) target:target commands:commands];
@@ -153,6 +249,20 @@ int main(int argc, char** argv) {
             std::printf("%zu\t%s\t%s\tmean=%.3f\tcontrast=%.3f\tsaturation=%.3f\n", i + 1, path.UTF8String,
                         renderer.status.UTF8String, stats.mean, stats.contrast, stats.saturation);
             std::fflush(stdout);
+            if (!framesDir.empty()) {
+                std::string name = presets[i];
+                if (!rootDir.empty() && name.rfind(rootDir, 0) == 0) name = name.substr(rootDir.size());
+                while (!name.empty() && name.front() == '/') name.erase(name.begin());
+                name = name.substr(0, name.size() - 5);
+                for (size_t at = name.find('/'); at != std::string::npos; at = name.find('/', at)) name.replace(at, 1, "__");
+                CGImageRef frame = imageFromTexture(target);
+                NSURL* url = [NSURL fileURLWithPath:[@(framesDir.c_str()) stringByAppendingPathComponent:[@(name.c_str()) stringByAppendingString:@".png"]]];
+                CGImageDestinationRef dest = CGImageDestinationCreateWithURL((__bridge CFURLRef)url, (__bridge CFStringRef)UTTypePNG.identifier, 1, nullptr);
+                CGImageDestinationAddImage(dest, frame, nullptr);
+                CGImageDestinationFinalize(dest);
+                CFRelease(dest);
+                CGImageRelease(frame);
+            }
             if (!writeSheet) continue;
 
             const int col = static_cast<int>(i % COLUMNS);

@@ -1,6 +1,6 @@
 // Translates every preset's warp and comp shaders to Metal and compiles the result on this Mac's
 // GPU, then links it against the app's vertex stages. Prints how many got through each step and groups the failures by their first error line.
-// `shader_check <dir> -v` lists each failure; `shader_check <file.milk> --dump` prints the MSL.
+// `shader_check <dir> -v` lists each failure; `shader_check <file.milk> --dump` prints the MSL, and `--hlsl` prints the wrapped HLSL.
 
 #include "milk_preset.h"
 #include "milk_shader.h"
@@ -59,6 +59,7 @@ int main(int argc, char** argv) {
         const std::string flag = argc > 2 ? argv[2] : "";
         const bool verbose = flag == "-v";
         const bool dump = flag == "--dump";
+        const bool hlsl = flag == "--hlsl";
         std::vector<std::filesystem::path> paths;
         if (std::filesystem::is_regular_file(argv[1])) {
             paths.push_back(argv[1]);
@@ -102,6 +103,11 @@ int main(int argc, char** argv) {
                 any = true;
                 ++counts[s].present;
                 TranslatedShader shader;
+                if (hlsl) {
+                    std::string source;
+                    if (wrappedShaderSource(s == 0 ? ShaderStage::WARP : ShaderStage::COMP, *code[s], source, error)) std::printf("==== %s HLSL ====\n%s\n", s == 0 ? "warp" : "comp", source.c_str());
+                    continue;
+                }
                 if (!translateShader(s == 0 ? ShaderStage::WARP : ShaderStage::COMP, *code[s], shader, error)) {
                     allOk = false;
                     ++translateErrors[firstErrorLine(error)];

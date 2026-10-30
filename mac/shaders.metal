@@ -116,36 +116,59 @@ vertex PresetOut presetCompVertex(uint vid [[vertex_id]],
     return out;
 }
 
-// One direction of a separable Gaussian blur. The source is decoded with its scale and bias,
-// and the result is encoded into the 0..1 range [encodeMin, encodeMin + 1 / encodeInvRange],
-// the way MilkDrop stores blur1..3. edgeDarken fades the image towards black at the borders.
+// MilkDrop's blur: a long horizontal pass that also moves the source's encoded range onto this
+// level's range, then a short vertical pass that darkens the edges of the first level. Each level
+// is stored in the 0..1 range [min, max] given by its blur_min and blur_max. The weights are
+// MilkDrop's eight, folded into pairs of bilinear taps.
 struct BlurUniforms {
-    float2 direction;
-    float decodeScale;
-    float decodeBias;
-    float encodeMin;
-    float encodeInvRange;
+    float scale;
+    float bias;
     float edgeDarken;
     float pad;
 };
 
-fragment float4 blurFragment(QuadOut in [[stage_in]],
-                             texture2d<float> source [[texture(0)]],
-                             sampler linear [[sampler(0)]],
-                             constant BlurUniforms& u [[buffer(0)]]) {
-    const float weights[5] = {0.2270270270, 0.1945945946, 0.1216216216, 0.0540540541, 0.0162162162};
-    const float2 step = u.direction / float2(source.get_width(), source.get_height());
-    float3 sum = source.sample(linear, in.uv).rgb * weights[0];
-    for (int i = 1; i < 5; ++i) {
-        sum += source.sample(linear, in.uv + step * float(i)).rgb * weights[i];
-        sum += source.sample(linear, in.uv - step * float(i)).rgb * weights[i];
-    }
-    float3 value = sum * u.decodeScale + u.decodeBias;
-    if (u.edgeDarken > 0.0) {
-        const float2 edge = min(in.uv, 1.0 - in.uv);
-        value *= 1.0 - u.edgeDarken * (1.0 - smoothstep(0.0, 0.08, min(edge.x, edge.y)));
-    }
-    return float4(saturate((value - u.encodeMin) * u.encodeInvRange), 1.0);
+constant float BLUR_W[8] = {4.0, 3.8, 3.5, 2.9, 1.9, 1.2, 0.7, 0.3};
+
+fragment float4 blurHorizontalFragment(QuadOut in [[stage_in]],
+                                       texture2d<float> source [[texture(0)]],
+                                       sampler linear [[sampler(0)]],
+                                       constant BlurUniforms& u [[buffer(0)]]) {
+    const float w1 = BLUR_W[0] + BLUR_W[1];
+    const float w2 = BLUR_W[2] + BLUR_W[3];
+    const float w3 = BLUR_W[4] + BLUR_W[5];
+    const float w4 = BLUR_W[6] + BLUR_W[7];
+    const float d1 = 0.0 + 2.0 * BLUR_W[1] / w1;
+    const float d2 = 2.0 + 2.0 * BLUR_W[3] / w2;
+    const float d3 = 4.0 + 2.0 * BLUR_W[5] / w3;
+    const float d4 = 6.0 + 2.0 * BLUR_W[7] / w4;
+    const float wDiv = 0.5 / (w1 + w2 + w3 + w4);
+    const float2 texel = 1.0 / float2(source.get_width(), source.get_height());
+    const float2 uv = in.uv + texel;
+    float3 blur = (source.sample(linear, uv + float2(d1 * texel.x, 0.0)).rgb + source.sample(linear, uv - float2(d1 * texel.x, 0.0)).rgb) * w1 +
+                  (source.sample(linear, uv + float2(d2 * texel.x, 0.0)).rgb + source.sample(linear, uv - float2(d2 * texel.x, 0.0)).rgb) * w2 +
+                  (source.sample(linear, uv + float2(d3 * texel.x, 0.0)).rgb + source.sample(linear, uv - float2(d3 * texel.x, 0.0)).rgb) * w3 +
+                  (source.sample(linear, uv + float2(d4 * texel.x, 0.0)).rgb + source.sample(linear, uv - float2(d4 * texel.x, 0.0)).rgb) * w4;
+    blur *= wDiv;
+    return float4(saturate(blur * u.scale + u.bias), 1.0);
+}
+
+fragment float4 blurVerticalFragment(QuadOut in [[stage_in]],
+                                     texture2d<float> source [[texture(0)]],
+                                     sampler linear [[sampler(0)]],
+                                     constant BlurUniforms& u [[buffer(0)]]) {
+    const float w1 = BLUR_W[0] + BLUR_W[1] + BLUR_W[2] + BLUR_W[3];
+    const float w2 = BLUR_W[4] + BLUR_W[5] + BLUR_W[6] + BLUR_W[7];
+    const float d1 = 0.0 + 2.0 * ((BLUR_W[2] + BLUR_W[3]) / w1);
+    const float d2 = 2.0 + 2.0 * ((BLUR_W[6] + BLUR_W[7]) / w2);
+    const float wDiv = 1.0 / ((w1 + w2) * 2.0);
+    const float2 texel = 1.0 / float2(source.get_width(), source.get_height());
+    const float2 uv = in.uv + float2(texel.x, 0.0);
+    float3 blur = (source.sample(linear, uv + float2(0.0, d1 * texel.y)).rgb + source.sample(linear, uv - float2(0.0, d1 * texel.y)).rgb) * w1 +
+                  (source.sample(linear, uv + float2(0.0, d2 * texel.y)).rgb + source.sample(linear, uv - float2(0.0, d2 * texel.y)).rgb) * w2;
+    blur *= wDiv;
+    float t = min(min(in.uv.x, in.uv.y), 1.0 - max(in.uv.x, in.uv.y));
+    t = (1.0 - u.edgeDarken) + u.edgeDarken * saturate(sqrt(max(t, 0.0)) * 5.0);
+    return float4(saturate(blur * t), 1.0);
 }
 
 // Custom shapes and waves. Positions arrive in pixels. A line's coverage falls off over its last

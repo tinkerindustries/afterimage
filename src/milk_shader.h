@@ -35,6 +35,9 @@ struct TranslatedShader {
 // [[user(locn2)]] rad and ang (float2).
 bool translateShader(ShaderStage stage, const std::string& presetCode, TranslatedShader& out, std::string& error);
 
+// The HLSL that translateShader hands to glslang, for inspecting a failure.
+bool wrappedShaderSource(ShaderStage stage, const std::string& presetCode, std::string& out, std::string& error);
+
 // The names of the header's uniforms, which every translated shader's uniformOffsets should hold.
 std::vector<std::string> shaderHeaderUniforms();
 

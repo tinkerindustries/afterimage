@@ -112,29 +112,32 @@ bool CustomWave::run(const CustomFrameInputs& in, const MilkAudioFrame& audio, C
 
     const bool spectrum = setting("bspectrum", 0.0) != 0.0;
     const int sampleCount = std::clamp(static_cast<int>(finiteOr(f.get("samples"), 0.0f)), 0, MAX_WAVE_POINTS);
-    const int separation = std::clamp(static_cast<int>(setting("sep", 0.0)), 0, std::max(0, sampleCount - 1));
+    const int separation = std::clamp(static_cast<int>(setting("sep", 0.0)), 0, 1024);
     out.dots = setting("busedots", 0.0) != 0.0;
     out.thick = setting("bdrawthick", 0.0) != 0.0;
     out.additive = setting("badditive", 0.0) != 0.0;
     if ((out.dots && sampleCount < 1) || sampleCount < 2) return false;
 
+    // MilkDrop reads the raw samples (or the spectrum) from a window centred on the first
+    // MILK_WAVE_SAMPLES, offset by half the separation for each channel.
     const float* pcmL = spectrum ? audio.spectrumL.data() : audio.waveL.data();
     const float* pcmR = spectrum ? audio.spectrumR.data() : audio.waveR.data();
-    const int available = spectrum ? MILK_SPECTRUM_SAMPLES : MILK_WAVE_SAMPLES;
+    const int available = spectrum ? MILK_SPECTRUM_SAMPLES : MILK_FFT_INPUT;
+    const int maxSamples = spectrum ? MILK_SPECTRUM_SAMPLES : MILK_WAVE_SAMPLES;
     const float mult = static_cast<float>(setting("scaling", 1.0)) * in.waveScale * (spectrum ? 0.15f : 0.004f);
-    float step = 1.0f;
-    if (spectrum) step = static_cast<float>(available - separation) / sampleCount;
-    else if (sampleCount > available) step = static_cast<float>(available) / sampleCount;
+    const int offsetL = spectrum ? 0 : (maxSamples - sampleCount) / 2 - separation / 2;
+    const int offsetR = spectrum ? 0 : (maxSamples - sampleCount) / 2 + separation / 2;
+    const float step = spectrum ? static_cast<float>(maxSamples - separation) / sampleCount : 1.0f;
     const float mix1 = std::pow(std::max(0.0f, static_cast<float>(setting("smoothing", 0.5))) * 0.98f, 0.5f);
     const float mix2 = 1.0f - mix1;
+    auto at = [&](int i, int offset) { return std::clamp(static_cast<int>(i * step) + offset, 0, available - 1); };
 
     std::vector<float> l(sampleCount), r(sampleCount);
-    l[0] = pcmL[0];
-    r[0] = pcmR[0];
+    l[0] = pcmL[at(0, offsetL)];
+    r[0] = pcmR[at(0, offsetR)];
     for (int i = 1; i < sampleCount; ++i) {
-        const int src = std::min(available - 1, static_cast<int>(i * step));
-        l[i] = pcmL[src] * mix2 + l[i - 1] * mix1;
-        r[i] = pcmR[src] * mix2 + r[i - 1] * mix1;
+        l[i] = pcmL[at(i, offsetL)] * mix2 + l[i - 1] * mix1;
+        r[i] = pcmR[at(i, offsetR)] * mix2 + r[i - 1] * mix1;
     }
     for (int i = sampleCount - 2; i >= 0; --i) {
         l[i] = l[i] * mix2 + l[i + 1] * mix1;

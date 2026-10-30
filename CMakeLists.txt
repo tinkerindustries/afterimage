@@ -136,7 +136,7 @@ if(APPLE)
   add_executable(milk_render tools/milk_render.mm)
   target_compile_options(milk_render PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
   target_compile_definitions(milk_render PRIVATE MILK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
-  target_link_libraries(milk_render PRIVATE milk_mac "-framework CoreText" "-framework ImageIO" "-framework UniformTypeIdentifiers")
+  target_link_libraries(milk_render PRIVATE milk_mac "-framework AudioToolbox" "-framework CoreText" "-framework ImageIO" "-framework UniformTypeIdentifiers")
 
   add_executable(MilkMetal MACOSX_BUNDLE
     mac/main.mm

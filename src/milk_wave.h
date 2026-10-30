@@ -25,8 +25,8 @@ struct MainWaveSettings {
     float scale = 1.0f;      // fWaveScale
     float smoothing = 0.75f; // fWaveSmoothing
     float time = 0.0f;
-    float vol = 1.0f;        // (bass + mid + treb) / 3
-    float treb = 1.0f;
+    float vol = 1.0f;        // 0.333 * (bass + mid + treb)
+    float treb = 1.0f;       // the raw treble band sum, as mode 3 reads it
 };
 
 // The waveform as MilkDrop draws it: up to two polylines in clip space (-1..1, y up), one colour,

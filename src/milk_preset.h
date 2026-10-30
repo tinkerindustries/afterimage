@@ -47,6 +47,9 @@ public:
     const std::vector<std::string>& errors() const { return m_errors; }
 
     // Runs per_frame for one frame and returns the variables for the warp and the wave.
+    // Sets the frame counter that `frame` reads, which MilkDrop keeps across presets.
+    void setFrame(uint64_t frame) { m_frame = frame; }
+
     FrameVars runFrame(const AudioLevels& audio, float time, float fps, int width, int height);
     float gamma() const { return m_gamma; }
     // q1..q32 (index 0..31) as per_frame left them, for the shaders.

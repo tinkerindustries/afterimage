@@ -7,8 +7,9 @@
 
 namespace Milk {
 
-constexpr int MESH_X = 64;
-constexpr int MESH_Y = 36;
+// Vertices of the warp mesh: 64 by 48 cells, as MilkDrop's mesh at any window shape.
+constexpr int MESH_X = 65;
+constexpr int MESH_Y = 49;
 
 enum WaveMode : int {
     WAVE_CIRCLE = 0,

@@ -18,6 +18,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (BOOL)loadPresetAtPath:(NSString*)path;
 
+// For offline rendering: plays `count` stereo samples at 48 kHz from sample `start` instead of the
+// synthesiser. The samples before `start` (up to two seconds) settle the band levels.
+- (void)useAudioLeft:(const float*)left right:(const float*)right count:(size_t)count start:(size_t)start;
+
 // Encodes one frame of `dt` seconds with a feedback image of `size` pixels, composited into
 // `target` (a texture in the output format).
 - (void)renderFrame:(float)dt internalSize:(CGSize)size target:(id<MTLTexture>)target commands:(id<MTLCommandBuffer>)commands;

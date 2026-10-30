@@ -5,6 +5,7 @@
 #include <SPIRV/GlslangToSpv.h>
 #include <spirv_msl.hpp>
 
+#include <cctype>
 #include <cstring>
 #include <mutex>
 #include <regex>
@@ -117,10 +118,23 @@ sampler3D sampler_noisevol_hq;
 #define log2(x) log2(abs(x))
 #define log10(x) log10(abs(x))
 
+// C++ alternative tokens that Metal's compiler reads as operators, if a preset names a variable one.
+#define or or_
+#define and and_
+#define not not_
+#define xor xor_
+#define compl compl_
+#define bitand bitand_
+#define bitor bitor_
+#define float1 float
+#define half1 float
 #define double float
 #define double2 float2
 #define double3 float3
 #define double4 float4
+
+// HLSL normalizes a scalar to its sign.
+float normalize(float x) { return sign(x); }
 
 #define lum(x) (dot(x,float3(0.32,0.49,0.29)))
 #define tex2d tex2D
@@ -176,7 +190,6 @@ const char* WARP_PROLOGUE = R"(
 const char* COMP_PROLOGUE = R"(
     float3 ret = 0;
     float2 uv = _uv.xy;
-    float2 uv_orig = _uv.xy;
     float rad = _rad_ang.x;
     float ang = _rad_ang.y;
     float3 hue_shader = _vDiffuse.xyz;
@@ -237,6 +250,89 @@ std::string fixSamplerDeclarations(const std::string& code) {
     return kept;
 }
 
+// Names whose values come from the uniforms, directly or through the header's macros.
+bool readsUniform(const std::string& text, const std::set<std::string>& deferredNames) {
+    static const std::set<std::string> macros = {
+        "time", "fps", "frame", "progress", "bass", "mid", "treb", "vol", "bass_att", "mid_att", "treb_att",
+        "vol_att", "aspect", "texsize", "roam_cos", "roam_sin", "slow_roam_cos", "slow_roam_sin", "mip_x",
+        "mip_y", "mip_xy", "mip_avg", "blur1_min", "blur1_max", "blur2_min", "blur2_max", "blur3_min",
+        "blur3_max", "GetBlur1", "GetBlur2", "GetBlur3",
+    };
+    static const std::regex word(R"([A-Za-z_]\w*)");
+    for (auto it = std::sregex_iterator(text.begin(), text.end(), word); it != std::sregex_iterator(); ++it) {
+        const std::string name = it->str();
+        if (macros.count(name) || isHeaderUniform(name) || deferredNames.count(name)) return true;
+        if (name.size() >= 2 && name[0] == 'q' && std::isdigit(static_cast<unsigned char>(name[1]))) return true;
+    }
+    return false;
+}
+
+std::vector<std::string> splitTopLevel(const std::string& text) {
+    std::vector<std::string> parts;
+    std::string part;
+    int depth = 0;
+    for (char c : text) {
+        if (c == '(' || c == '[' || c == '{') ++depth;
+        else if (c == ')' || c == ']' || c == '}') --depth;
+        if (c == ',' && depth == 0) {
+            parts.push_back(part);
+            part.clear();
+        } else {
+            part += c;
+        }
+    }
+    parts.push_back(part);
+    return parts;
+}
+
+// Rewrites one top-level declaration (`float a = q1, b;`, `static const float3 c = 0.5;`) so that
+// it works with the entry point's uniform copies. A variable becomes a static. When its
+// initialiser reads a uniform, or a variable that does, the initialiser moves to `deferred`, which
+// runs after the copies. Constants that read no uniform stay as written, since they may size an
+// array or bound a loop. Returns false when the statement is not a plain declaration.
+bool emitDeclaration(const std::string& statement, std::string& out, std::string& deferred, std::set<std::string>& deferredNames) {
+    static const std::regex head(
+        R"(^(\s*)((?:static\s+|const\s+|uniform\s+)*)((?:float|half|int|uint|bool|double)[1-4]?(?:x[1-4])?)\s+([\s\S]*);\s*$)");
+    static const std::regex declarator(R"(^\s*(\w+)\s*(\[[^\]]*\])?\s*(?:=([\s\S]*))?$)");
+    std::smatch m;
+    if (!std::regex_match(statement, m, head)) return false;
+    const std::string qualifiers = m[2].str();
+    const bool isConst = qualifiers.find("const") != std::string::npos;
+    const std::vector<std::string> parts = splitTopLevel(m[4].str());
+    std::vector<std::string> names, arrays, inits;
+    std::vector<bool> hasInit;
+    for (const std::string& part : parts) {
+        std::smatch d;
+        if (!std::regex_match(part, d, declarator)) return false;
+        names.push_back(d[1].str());
+        arrays.push_back(d[2].str());
+        inits.push_back(d[3].str());
+        hasInit.push_back(d[3].matched);
+    }
+    std::string emitted = m[1].str();
+    std::string later;
+    for (size_t i = 0; i < names.size(); ++i) {
+        const bool texsize = names[i].rfind("texsize_", 0) == 0 && !hasInit[i];
+        if (texsize) {
+            emitted += m[3].str() + " " + names[i] + arrays[i] + ";";
+        } else if (hasInit[i] && inits[i].find('{') != std::string::npos) {
+            emitted += qualifiers + (isConst ? "" : "static ") + m[3].str() + " " + names[i] + arrays[i] + " =" + inits[i] + ";";
+        } else if (isConst && !readsUniform(inits[i], deferredNames)) {
+            emitted += qualifiers + m[3].str() + " " + names[i] + arrays[i] + (hasInit[i] ? " =" + inits[i] : std::string()) + ";";
+        } else {
+            emitted += "static " + m[3].str() + " " + names[i] + arrays[i] + ";";
+            if (hasInit[i]) {
+                if (readsUniform(inits[i], deferredNames)) deferredNames.insert(names[i]);
+                later += "    " + names[i] + " = " + inits[i] + ";\n";
+            }
+        }
+        emitted += " ";
+    }
+    out += emitted;
+    deferred += later;
+    return true;
+}
+
 // DX9 treated a preset's own top-level variables (`float3 col;`) as uniforms it could still
 // write. Here they become statics, except texsize_<name>, which the renderer fills in.
 //
@@ -246,35 +342,23 @@ std::string fixSamplerDeclarations(const std::string& code) {
 // declaration and returned in `deferred`, to run after those copies.
 std::string makeGlobalsStatic(const std::string& code, std::string& deferred) {
     static const std::regex typeStart(R"(^\s*(float|half|int|uint|bool|double)[1-4]?(x[1-4])?\s+(\w+))");
-    static const std::regex single(
-        R"(^(\s*)((?:static\s+|const\s+|uniform\s+)*)((?:float|half|int|uint|bool|double)[1-4]?(?:x[1-4])?)\s+(\w+)(\s*\[[^\]]*\])?\s*(?:=([\s\S]*))?;\s*$)");
     std::string out;
     std::string statement;
+    std::set<std::string> deferredNames;
     int depth = 0;
-    auto hasTopLevelComma = [](const std::string& text) {
-        int parens = 0;
-        for (char c : text) {
-            if (c == '(') ++parens;
-            else if (c == ')') --parens;
-            else if (c == ',' && parens == 0) return true;
-        }
-        return false;
-    };
     auto flush = [&] {
-        std::smatch m;
-        if (depth == 0 && std::regex_match(statement, m, single)) {
-            const std::string qualifiers = m[2].str();
-            const std::string name = m[4].str();
-            const bool isConst = qualifiers.find("const") != std::string::npos;
-            const bool hasInit = m[6].matched;
-            const std::string init = m[6].str();
-            const bool keepUniform = name.rfind("texsize_", 0) == 0 && !hasInit;
-            if (!isConst && !keepUniform && !hasTopLevelComma(init) && init.find('{') == std::string::npos) {
-                out += m[1].str() + "static " + m[3].str() + " " + name + m[5].str() + ";";
-                if (hasInit) deferred += "    " + name + " = " + init + ";\n";
-                statement.clear();
-                return;
-            }
+        // Preprocessor lines end at the newline, not at a ';', so they ride along at the front.
+        for (;;) {
+            const size_t first = statement.find_first_not_of(" \t\r\n");
+            if (first == std::string::npos || statement[first] != '#') break;
+            size_t end = statement.find('\n', first);
+            if (end == std::string::npos) end = statement.size();
+            out += statement.substr(0, end);
+            statement.erase(0, end);
+        }
+        if (depth == 0 && emitDeclaration(statement, out, deferred, deferredNames)) {
+            statement.clear();
+            return;
         }
         std::smatch t;
         const bool declaration = depth == 0 && std::regex_search(statement, t, typeStart) &&
@@ -313,6 +397,117 @@ std::string makeGlobalsStatic(const std::string& code, std::string& deferred) {
     return out;
 }
 
+// glslang's HLSL parser rejects a unary minus in front of a parenthesised comparison, such as
+// `-(lum(ret)<sin(time))*ret`. Such a minus becomes `-1.0*`, which means the same.
+std::string fixNegatedComparisons(const std::string& code) {
+    std::string out;
+    size_t i = 0;
+    while (i < code.size()) {
+        const char c = code[i];
+        if (c == '-' && i + 1 < code.size()) {
+            size_t open = i + 1;
+            while (open < code.size() && std::isspace(static_cast<unsigned char>(code[open]))) ++open;
+            size_t before = out.size();
+            while (before > 0 && std::isspace(static_cast<unsigned char>(out[before - 1]))) --before;
+            const char prev = before > 0 ? out[before - 1] : '(';
+            const bool unary = !(std::isalnum(static_cast<unsigned char>(prev)) || prev == '_' || prev == ')' || prev == ']' ||
+                                 prev == '.' || prev == '-');
+            if (unary && open < code.size() && code[open] == '(') {
+                int depth = 0;
+                bool comparison = false;
+                size_t j = open;
+                for (; j < code.size(); ++j) {
+                    const char d = code[j];
+                    if (d == '(') ++depth;
+                    else if (d == ')' && --depth == 0) break;
+                    else if (depth == 1 && (d == '<' || d == '>' || ((d == '=' || d == '!') && j + 1 < code.size() && code[j + 1] == '='))) {
+                        comparison = true;
+                    }
+                }
+                if (comparison) {
+                    out += "-1.0*";
+                    i = open;
+                    continue;
+                }
+            }
+        }
+        out += c;
+        ++i;
+    }
+    return out;
+}
+
+// DX9 let a vector array take one flat list of numbers, `float4 s[2] = { 1,2,3,4, 5,6,7,8 };`.
+// glslang wants each element braced, so the numbers are regrouped by the vector's width.
+std::string groupArrayInitialisers(const std::string& code) {
+    static const std::regex decl(R"(\b(?:float|half|int)([234])\s+\w+\s*\[[^\]]*\]\s*=\s*\{([^{}]*)\})");
+    std::string out;
+    size_t last = 0;
+    for (auto it = std::sregex_iterator(code.begin(), code.end(), decl); it != std::sregex_iterator(); ++it) {
+        const std::smatch& m = *it;
+        const int width = m[1].str()[0] - '0';
+        const std::string list = m[2].str();
+        std::vector<std::string> items;
+        std::string item;
+        int parens = 0;
+        for (char c : list) {
+            if (c == '(') ++parens;
+            else if (c == ')') --parens;
+            if (c == ',' && parens == 0) {
+                items.push_back(item);
+                item.clear();
+            } else {
+                item += c;
+            }
+        }
+        if (item.find_first_not_of(" \t\r\n") != std::string::npos) items.push_back(item);
+        if (items.size() <= static_cast<size_t>(width) || items.size() % width != 0) continue;
+        std::string grouped;
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (i % width == 0) grouped += i == 0 ? "{" : ", {";
+            grouped += (i % width == 0 ? "" : ",") + items[i];
+            if (i % width == width - 1) grouped += "}";
+        }
+        const size_t brace = m.str().find('{');
+        out += code.substr(last, m.position() - last) + m.str().substr(0, brace) + "{" + grouped + "}";
+        last = m.position() + m.length();
+    }
+    return out + code.substr(last);
+}
+
+// `sampler sampler_x = sampler_state { AddressU = WRAP; };` carries sampler state that the renderer
+// sets itself, so only the declaration is kept.
+std::string dropSamplerState(const std::string& code) {
+    static const std::regex state(R"(\bsampler(?:2D|3D)?\s+(\w+)\s*=\s*sampler_state\s*\{[^}]*\}\s*;)");
+    return std::regex_replace(code, state, "sampler $1;");
+}
+
+// HLSL passes a vector to a function that takes a float by dropping all but the first component.
+// glslang does not, so each one-parameter float function gets float2, float3 and float4 overloads.
+std::string addVectorOverloads(const std::string& code) {
+    static const std::regex func(R"((?:^|[;}\n])\s*(float[1-4]?)\s+(\w+)\s*\(\s*(?:in\s+)?float\s+(\w+)\s*\)\s*\{)");
+    std::string out;
+    size_t last = 0;
+    for (auto it = std::sregex_iterator(code.begin(), code.end(), func); it != std::sregex_iterator(); ++it) {
+        const std::smatch& m = *it;
+        size_t pos = m.position() + m.length();
+        if (pos < last) continue;
+        int depth = 1;
+        while (pos < code.size() && depth > 0) {
+            if (code[pos] == '{') ++depth;
+            else if (code[pos] == '}') --depth;
+            ++pos;
+        }
+        out += code.substr(last, pos - last);
+        for (const char* type : {"float2", "float3", "float4"}) {
+            out += "\n" + m[1].str() + " " + m[2].str() + "(" + type + " v) { return " + m[2].str() + "(v.x); }";
+        }
+        out += "\n";
+        last = pos;
+    }
+    return out + code.substr(last);
+}
+
 bool wrapBody(ShaderStage stage, const std::string& code, std::string& out, std::string& error) {
     const size_t marker = code.find("shader_body");
     if (marker == std::string::npos) {
@@ -328,14 +523,17 @@ bool wrapBody(ShaderStage stage, const std::string& code, std::string& out, std:
     out = uniformDeclarations();
     out += SHADER_HEADER;
     std::string deferred;
-    out += makeGlobalsStatic(fixSamplerDeclarations(code.substr(0, marker)), deferred);
+    out += addVectorOverloads(makeGlobalsStatic(
+        fixSamplerDeclarations(dropSamplerState(groupArrayInitialisers(fixNegatedComparisons(code.substr(0, marker))))), deferred));
+    // MilkDrop defines the comp shader's uv_orig as the same variable as uv.
+    if (stage == ShaderStage::COMP) out += "#define uv_orig uv\n";
     out += ENTRY_SIGNATURE;
     out += "{\n";
     out += uniformCopies();
     out += deferred;
     out += stage == ShaderStage::WARP ? WARP_PROLOGUE : COMP_PROLOGUE;
     out += "{\n";
-    out += code.substr(open + 1, close - open - 1);
+    out += groupArrayInitialisers(fixNegatedComparisons(code.substr(open + 1, close - open - 1)));
     out += "\n}\n";
     out += stage == ShaderStage::WARP ? WARP_EPILOGUE : COMP_EPILOGUE;
     out += "}\n";
@@ -418,6 +616,10 @@ std::vector<std::string> shaderHeaderUniforms() {
     std::vector<std::string> names;
     for (const auto& u : UNIFORMS) names.push_back(u[1]);
     return names;
+}
+
+bool wrappedShaderSource(ShaderStage stage, const std::string& presetCode, std::string& out, std::string& error) {
+    return wrapBody(stage, presetCode, out, error);
 }
 
 bool translateShader(ShaderStage stage, const std::string& presetCode, TranslatedShader& out, std::string& error) {

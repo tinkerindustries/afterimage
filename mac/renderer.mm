@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -41,6 +42,7 @@ constexpr NSInteger MOTION_FPS = 120;
 enum AudioSource : int {
     SOURCE_SYSTEM = 0,
     SOURCE_SYNTH = 1,
+    SOURCE_FILE = 2,
 };
 
 struct WarpVertex {
@@ -70,11 +72,8 @@ struct ClassicUniforms {
 };
 
 struct BlurUniforms {
-    float direction[2];
-    float decodeScale;
-    float decodeBias;
-    float encodeMin;
-    float encodeInvRange;
+    float scale;
+    float bias;
     float edgeDarken;
     float pad;
 };
@@ -85,17 +84,81 @@ struct BlurRange {
     float max = 1.0f;
 };
 
-std::array<float, 12> rotation(float ax, float ay, float az) {
+// MilkDrop 2 builds the warp and comp shaders of a preset that saved none from its fixed values:
+// decay and wrap for the warp, and gamma, video echo, the corner tint and the four filters for
+// the comp. Numbers print at two decimals (three for the echo zoom), as MilkDrop writes them.
+std::string defaultWarpShader(double decay, bool wrap) {
+    char text[512];
+    std::snprintf(text, sizeof(text), "shader_body\n{\n    ret = tex2D( sampler%s_main, uv ).xyz;\n    ret *= %.2f;\n}\n",
+                  wrap ? "" : "_fc", decay);
+    return text;
+}
+
+std::string defaultCompShader(double gamma, double echoAlpha, double echoZoom, int echoOrient, double hue, bool brighten,
+                              bool darken, bool solarize, bool invert) {
+    char line[256];
+    std::string out = "shader_body\n{\n";
+    if (echoAlpha > 0.001) {
+        std::snprintf(line, sizeof(line), "    float2 uv_echo = (uv - 0.5)*%.3f*float2(%d,%d) + 0.5;\n", 1.0 / echoZoom,
+                      echoOrient % 2 ? -1 : 1, echoOrient >= 2 ? -1 : 1);
+        out += line;
+        std::snprintf(line, sizeof(line), "    ret = lerp( tex2D(sampler_main, uv).xyz, tex2D(sampler_main, uv_echo).xyz, %.2f );\n", echoAlpha);
+        out += line;
+    } else {
+        out += "    ret = tex2D(sampler_main, uv).xyz;\n";
+    }
+    std::snprintf(line, sizeof(line), "    ret *= %.2f;\n", gamma);
+    out += line;
+    if (hue >= 1.0) {
+        out += "    ret *= hue_shader;\n";
+    } else if (hue > 0.001) {
+        std::snprintf(line, sizeof(line), "    ret *= %.2f + %.2f*hue_shader;\n", 1.0 - hue, hue);
+        out += line;
+    }
+    if (brighten) out += "    ret = sqrt(ret);\n";
+    if (darken) out += "    ret *= ret;\n";
+    if (solarize) out += "    ret = ret*(1-ret)*4;\n";
+    if (invert) out += "    ret = 1 - ret;\n";
+    out += "}\n";
+    return out;
+}
+
+// Direct3D's row-vector 4x4 matrices, stored row by row.
+using Mat4 = std::array<float, 16>;
+
+Mat4 multiply(const Mat4& a, const Mat4& b) {
+    Mat4 out{};
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            for (int k = 0; k < 4; ++k) out[i * 4 + j] += a[i * 4 + k] * b[k * 4 + j];
+        }
+    }
+    return out;
+}
+
+// MilkDrop's rot_ matrices: Rx * Translate * Rz * Ry in Direct3D's order, of which the shader sees
+// the first three columns (a float4x3).
+std::array<float, 12> shaderMatrix(float ax, float ay, float az, float tx, float ty, float tz) {
     const float cx = std::cos(ax), sx = std::sin(ax);
     const float cy = std::cos(ay), sy = std::sin(ay);
     const float cz = std::cos(az), sz = std::sin(az);
-    // Rows of Rx * Ry * Rz, then a zero translation row.
-    return {
-        cy * cz, cy * sz, -sy,
-        sx * sy * cz - cx * sz, sx * sy * sz + cx * cz, sx * cy,
-        cx * sy * cz + sx * sz, cx * sy * sz - sx * cz, cx * cy,
-        0.0f, 0.0f, 0.0f,
-    };
+    const Mat4 mx = {1, 0, 0, 0, 0, cx, sx, 0, 0, -sx, cx, 0, 0, 0, 0, 1};
+    const Mat4 my = {cy, 0, -sy, 0, 0, 1, 0, 0, sy, 0, cy, 0, 0, 0, 0, 1};
+    const Mat4 mz = {cz, sz, 0, 0, -sz, cz, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const Mat4 mt = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, tx, ty, tz, 1};
+    const Mat4 m = multiply(multiply(multiply(mx, mt), mz), my);
+    return {m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10], m[12], m[13], m[14]};
+}
+
+// MilkDrop's final-composite grid: 32 by 24 vertices, bunched towards the centre, with the centre
+// row and column doubled so the angle can jump there. `rad` is 1 at the corners and `ang` runs from
+// 0 at three o'clock clockwise through 2 pi, with fixed values on the centre lines.
+constexpr int COMP_X = 32;
+constexpr int COMP_Y = 24;
+
+float squishToCenter(float x, float exponent) {
+    if (x > 0.5f) return std::pow(x * 2.0f - 1.0f, exponent) * 0.5f + 0.5f;
+    return (1.0f - std::pow(1.0f - x * 2.0f, exponent)) * 0.5f;
 }
 
 } // namespace
@@ -107,7 +170,8 @@ std::array<float, 12> rotation(float ax, float ay, float az) {
     id<MTLRenderPipelineState> m_wavePipeline;
     id<MTLRenderPipelineState> m_compositePipeline;
     id<MTLRenderPipelineState> m_classicPipeline;
-    id<MTLRenderPipelineState> m_blurPipeline;
+    id<MTLRenderPipelineState> m_blurHorizontalPipeline;
+    id<MTLRenderPipelineState> m_blurVerticalPipeline;
     id<MTLRenderPipelineState> m_clampPipeline;
     id<MTLRenderPipelineState> m_noisePipeline;
     bool m_seedNoise;
@@ -120,6 +184,9 @@ std::array<float, 12> rotation(float ax, float ay, float az) {
     id<MTLSamplerState> m_repeatSampler;
     id<MTLBuffer> m_meshIndices;
     NSUInteger m_meshIndexCount;
+    id<MTLBuffer> m_compGrid;
+    id<MTLBuffer> m_compIndices;
+    NSUInteger m_compIndexCount;
     id<MTLTexture> m_textures[2];
     id<MTLTexture> m_blur[3];
     id<MTLTexture> m_blurTemp[3];
@@ -130,6 +197,8 @@ std::array<float, 12> rotation(float ax, float ay, float az) {
     SynthState m_synth;
     SystemAudioTap m_tap;
     std::unique_ptr<BandLevels> m_bands;
+    std::vector<float> m_fileL, m_fileR;
+    size_t m_filePos;
     AudioSource m_source;
     std::string m_tapError;
     std::vector<std::string> m_presetPaths;
@@ -139,7 +208,8 @@ std::array<float, 12> rotation(float ax, float ay, float az) {
     std::unique_ptr<PresetGpu> m_gpu;
     int m_compVersion;
     uint32_t m_presetSeed;
-    uint64_t m_presetFrame;
+    uint64_t m_frame;
+    float m_presetStartTime;
     std::mt19937 m_random;
     std::array<float, 4> m_randPreset;
     std::vector<float> m_scratch;
@@ -219,7 +289,8 @@ std::array<float, 12> rotation(float ax, float ay, float az) {
     m_compVersion = 2;
     m_seedNoise = false;
     m_presetSeed = 0;
-    m_presetFrame = 0;
+    m_frame = 0;
+    m_presetStartTime = 0.0f;
     m_random.seed(1);
     m_bank = std::make_unique<TextureBank>(m_device, std::string(MILK_PRESET_DIR) + "/textures");
     return self;
@@ -242,8 +313,10 @@ std::array<float, 12> rotation(float ax, float ay, float az) {
     m_warpPipeline = [m_device newRenderPipelineStateWithDescriptor:desc error:&nsError];
 
     desc.vertexFunction = [library newFunctionWithName:@"fullscreenVertex"];
-    desc.fragmentFunction = [library newFunctionWithName:@"blurFragment"];
-    m_blurPipeline = [m_device newRenderPipelineStateWithDescriptor:desc error:&nsError];
+    desc.fragmentFunction = [library newFunctionWithName:@"blurHorizontalFragment"];
+    m_blurHorizontalPipeline = [m_device newRenderPipelineStateWithDescriptor:desc error:&nsError];
+    desc.fragmentFunction = [library newFunctionWithName:@"blurVerticalFragment"];
+    m_blurVerticalPipeline = [m_device newRenderPipelineStateWithDescriptor:desc error:&nsError];
 
     desc.fragmentFunction = [library newFunctionWithName:@"clampFragment"];
     m_clampPipeline = [m_device newRenderPipelineStateWithDescriptor:desc error:&nsError];
@@ -290,7 +363,7 @@ std::array<float, 12> rotation(float ax, float ay, float az) {
     desc.fragmentFunction = [library newFunctionWithName:@"classicCompositeFragment"];
     m_classicPipeline = [m_device newRenderPipelineStateWithDescriptor:desc error:&nsError];
 
-    if (m_warpPipeline == nil || m_wavePipeline == nil || m_compositePipeline == nil || m_blurPipeline == nil || m_clampPipeline == nil || m_classicPipeline == nil || m_noisePipeline == nil ||
+    if (m_warpPipeline == nil || m_wavePipeline == nil || m_compositePipeline == nil || m_blurHorizontalPipeline == nil || m_blurVerticalPipeline == nil || m_clampPipeline == nil || m_classicPipeline == nil || m_noisePipeline == nil ||
         m_presetWarpVertex == nil || m_presetCompVertex == nil) {
         if (error) *error = [NSString stringWithFormat:@"pipeline creation failed: %@", nsError.localizedDescription];
         return NO;
@@ -315,10 +388,65 @@ std::array<float, 12> rotation(float ax, float ay, float az) {
                                          options:MTLResourceStorageModeShared];
 }
 
+- (void)buildCompGrid:(NSUInteger)width height:(NSUInteger)height {
+    const float aspectX = (height > width) ? static_cast<float>(width) / height : 1.0f;
+    const float aspectY = (width > height) ? static_cast<float>(height) / width : 1.0f;
+    const float cornerRadius = std::sqrt(aspectX * aspectX + aspectY * aspectY);
+    const float pi = 3.1415926535898f;
+    std::vector<WarpVertex> verts(COMP_X * COMP_Y);
+    for (int j = 0; j < COMP_Y; ++j) {
+        const int j2 = j - j / (COMP_Y / 2);
+        const float v = squishToCenter(j2 / static_cast<float>(COMP_Y - 2), 3.0f);
+        for (int i = 0; i < COMP_X; ++i) {
+            const int i2 = i - i / (COMP_X / 2);
+            const float u = squishToCenter(i2 / static_cast<float>(COMP_X - 2), 3.0f);
+            const float px = (u * 2.0f - 1.0f) * aspectX;
+            const float py = (v * 2.0f - 1.0f) * aspectY;
+            const float rad = std::sqrt(px * px + py * py) / cornerRadius;
+            float ang = std::atan2(py, px);
+            if (ang < 0.0f) ang += 6.2831853071796f;
+            if (i == COMP_X / 2 - 1) {
+                ang = j < COMP_Y / 2 - 1 ? pi * 1.5f : j == COMP_Y / 2 - 1 ? pi * 1.25f : j == COMP_Y / 2 ? pi * 0.75f : pi * 0.5f;
+            } else if (i == COMP_X / 2) {
+                ang = j < COMP_Y / 2 - 1 ? pi * 1.5f : j == COMP_Y / 2 - 1 ? pi * 1.75f : j == COMP_Y / 2 ? pi * 0.25f : pi * 0.5f;
+            } else if (j == COMP_Y / 2 - 1) {
+                ang = i < COMP_X / 2 - 1 ? pi : i == COMP_X / 2 - 1 ? pi * 1.25f : i == COMP_X / 2 ? pi * 1.75f : pi * 2.0f;
+            } else if (j == COMP_Y / 2) {
+                ang = i < COMP_X / 2 - 1 ? pi : i == COMP_X / 2 - 1 ? pi * 0.75f : i == COMP_X / 2 ? pi * 0.25f : 0.0f;
+            }
+            verts[j * COMP_X + i] = WarpVertex{u * 2.0f - 1.0f, 1.0f - v * 2.0f, u, v, u, v, rad, ang};
+        }
+    }
+    // The triangles skip the doubled centre row and column, and alternate their diagonals so the
+    // angle interpolates the same way on every side.
+    std::vector<uint16_t> indices;
+    for (int y = 0; y < COMP_Y - 1; ++y) {
+        if (y == COMP_Y / 2 - 1) continue;
+        for (int x = 0; x < COMP_X - 1; ++x) {
+            if (x == COMP_X / 2 - 1) continue;
+            const bool leftHalf = x < COMP_X / 2;
+            const bool topHalf = y < COMP_Y / 2;
+            const bool centre4 = (x == COMP_X / 2 || x == COMP_X / 2 - 1) && (y == COMP_Y / 2 || y == COMP_Y / 2 - 1);
+            const uint16_t a = static_cast<uint16_t>(y * COMP_X + x);
+            const uint16_t b = static_cast<uint16_t>(a + 1);
+            const uint16_t c = static_cast<uint16_t>((y + 1) * COMP_X + x);
+            const uint16_t d = static_cast<uint16_t>(c + 1);
+            if ((static_cast<int>(leftHalf) + static_cast<int>(topHalf) + static_cast<int>(centre4)) % 2) {
+                indices.insert(indices.end(), {a, b, d, d, c, a});
+            } else {
+                indices.insert(indices.end(), {c, a, b, b, d, c});
+            }
+        }
+    }
+    m_compGrid = [m_device newBufferWithBytes:verts.data() length:verts.size() * sizeof(WarpVertex) options:MTLResourceStorageModeShared];
+    m_compIndexCount = indices.size();
+    m_compIndices = [m_device newBufferWithBytes:indices.data() length:indices.size() * sizeof(uint16_t) options:MTLResourceStorageModeShared];
+}
+
 - (void)startSystemAudio {
     m_tapError.clear();
     if (m_tap.start(m_tapError)) {
-        m_bands = std::make_unique<BandLevels>(m_tap.sampleRate());
+        m_bands = std::make_unique<BandLevels>();
         m_source = SOURCE_SYSTEM;
     } else {
         NSLog(@"System audio unavailable: %s", m_tapError.c_str());
@@ -353,13 +481,25 @@ std::array<float, 12> rotation(float ax, float ay, float az) {
     m_player = std::make_unique<PresetPlayer>(file);
     for (const std::string& e : m_player->errors()) NSLog(@"%s: %s", file.name.c_str(), e.c_str());
     m_presetSeed = m_random();
-    m_presetFrame = 0;
+    // The equations' time and frame run from the start of the session. Shaders see time since this
+    // preset started.
+    m_presetStartTime = m_time;
+    m_player->setFrame(m_frame);
     std::uniform_real_distribution<float> unit(0.0f, 1.0f);
     m_randPreset = {unit(m_random), unit(m_random), unit(m_random), unit(m_random)};
     m_compVersion = file.compVersion;
     // A stage whose shader version is 0 ignores any shader code, as MilkDrop does.
-    const std::string warpCode = file.warpVersion > 0 ? file.warpShader : std::string();
-    const std::string compCode = file.compVersion > 0 ? file.compShader : std::string();
+    std::string warpCode = file.warpVersion > 0 ? file.warpShader : std::string();
+    std::string compCode = file.compVersion > 0 ? file.compShader : std::string();
+    auto base = [&](const char* name, double fallback) { return m_player->baseValue(name, fallback); };
+    if (file.warpVersion > 0 && warpCode.find("shader_body") == std::string::npos) {
+        warpCode = defaultWarpShader(base("decay", 0.98), base("wrap", 1.0) != 0.0);
+    }
+    if (file.compVersion > 0 && compCode.find("shader_body") == std::string::npos) {
+        compCode = defaultCompShader(base("gamma", 2.0), base("echo_alpha", 0.0), base("echo_zoom", 1.0),
+                                     static_cast<int>(base("echo_orient", 0.0)), base("fshader", 0.0), base("brighten", 0.0) != 0.0,
+                                     base("darken", 0.0) != 0.0, base("solarize", 0.0) != 0.0, base("invert", 0.0) != 0.0);
+    }
     if (!warpCode.empty() || !compCode.empty()) {
         m_gpu = std::make_unique<PresetGpu>(m_device, m_presetWarpVertex, m_presetCompVertex, FEEDBACK_FORMAT,
                                             m_drawableFormat, *m_bank, warpCode, compCode, m_presetSeed);
@@ -395,6 +535,21 @@ std::array<float, 12> rotation(float ax, float ay, float az) {
     }
 }
 
+- (void)useAudioLeft:(const float*)left right:(const float*)right count:(size_t)count start:(size_t)start {
+    m_fileL.assign(left, left + count);
+    m_fileR.assign(right, right + count);
+    m_bands = std::make_unique<BandLevels>();
+    // Run the band averages over up to two seconds before the start, so the first frames are not
+    // measured against an empty average.
+    const size_t lead = std::min<size_t>(start, 2 * SAMPLE_RATE);
+    std::vector<float> mono(SAMPLE_RATE / 60);
+    for (size_t at = start - lead; at + mono.size() <= start; at += mono.size()) {
+        m_bands->update(m_fileL.data() + at, static_cast<int>(mono.size()), 1.0f);
+    }
+    m_filePos = start;
+    m_source = SOURCE_FILE;
+}
+
 - (void)clear { m_needsClear = true; }
 
 - (void)seedNoise {
@@ -403,7 +558,7 @@ std::array<float, 12> rotation(float ax, float ay, float az) {
 }
 
 - (NSString*)status {
-    std::string audio = m_source == SOURCE_SYSTEM ? "system audio" : "synth";
+    std::string audio = m_source == SOURCE_SYSTEM ? "system audio" : m_source == SOURCE_FILE ? "audio file" : "synth";
     if (m_source == SOURCE_SYNTH && !m_tapError.empty()) audio += " (system audio unavailable)";
     if (m_player) {
         std::string notes;
@@ -436,12 +591,24 @@ std::array<float, 12> rotation(float ax, float ay, float az) {
     if (m_textures[0] != nil && m_textures[0].width == width && m_textures[0].height == height) return;
     m_textures[0] = [self renderTarget:width height:height];
     m_textures[1] = [self renderTarget:width height:height];
-    for (int level = 0; level < 3; ++level) {
-        const NSUInteger shift = static_cast<NSUInteger>(level + 1);
-        m_blur[level] = [self renderTarget:width >> shift height:height >> shift];
-        m_blurTemp[level] = [self renderTarget:width >> shift height:height >> shift];
+    // MilkDrop's blur textures: each level has a horizontal pass into a texture half the size of
+    // its source and a vertical pass into the result. Only the first level shrinks again, so for a
+    // 1024 pixel image blur1, blur2 and blur3 are 256, 128 and 64 wide. Widths round down to a
+    // multiple of 16 and heights to a multiple of 4.
+    {
+        NSUInteger w = width, h = height;
+        for (int i = 0; i < 6; ++i) {
+            if (!(i & 1) || i < 2) {
+                w = std::max<NSUInteger>(16, w / 2);
+                h = std::max<NSUInteger>(16, h / 2);
+            }
+            id<MTLTexture> texture = [self renderTarget:((w + 3) / 16) * 16 height:((h + 3) / 4) * 4];
+            if (i & 1) m_blur[i / 2] = texture;
+            else m_blurTemp[i / 2] = texture;
+        }
     }
     m_needsClear = true;
+    [self buildCompGrid:width height:height];
 
     const float aspectX = (height > width) ? static_cast<float>(width) / height : 1.0f;
     const float aspectY = (width > height) ? static_cast<float>(height) / width : 1.0f;
@@ -479,14 +646,41 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     if (m_source == SOURCE_SYSTEM) {
         count = m_tap.read(m_scratch.data(), m_scratchR.data(), SCRATCH_SAMPLES);
         for (int i = 0; i < count; ++i) m_mono[i] = 0.5f * (m_scratch[i] + m_scratchR[i]);
-        m_bands->update(m_mono.data(), count, frameScale);
+        m_bands->update(m_scratch.data(), count, frameScale);
+        levels = m_bands->levels();
+    } else if (m_source == SOURCE_FILE) {
+        count = std::min(SCRATCH_SAMPLES, static_cast<int>(std::lround(dt * SAMPLE_RATE)));
+        for (int i = 0; i < count; ++i) {
+            const size_t at = m_filePos + i;
+            m_scratch[i] = at < m_fileL.size() ? m_fileL[at] : 0.0f;
+            m_scratchR[i] = at < m_fileR.size() ? m_fileR[at] : 0.0f;
+            m_mono[i] = 0.5f * (m_scratch[i] + m_scratchR[i]);
+        }
+        m_filePos += count;
+        m_bands->update(m_scratch.data(), count, frameScale);
         levels = m_bands->levels();
     } else {
         count = std::min(SCRATCH_SAMPLES, static_cast<int>(std::lround(dt * SAMPLE_RATE)));
         synthesise(m_synth, m_params.bpm, count, m_mono.data());
         std::memcpy(m_scratch.data(), m_mono.data(), count * sizeof(float));
         std::memcpy(m_scratchR.data(), m_mono.data(), count * sizeof(float));
-        levels = m_synth.levels;
+        if (m_player) {
+            // Presets read the levels MilkDrop's analysis would give. Run two seconds of the same
+            // synth through it first, as a MilkDrop session would already have its averages.
+            if (!m_bands) {
+                m_bands = std::make_unique<BandLevels>();
+                SynthState lead = m_synth;
+                std::vector<float> block(SAMPLE_RATE / 60);
+                for (int i = 0; i < 120; ++i) {
+                    synthesise(lead, m_params.bpm, static_cast<int>(block.size()), block.data());
+                    m_bands->update(block.data(), static_cast<int>(block.size()), 1.0f);
+                }
+            }
+            m_bands->update(m_mono.data(), count, frameScale);
+            levels = m_bands->levels();
+        } else {
+            levels = m_synth.levels;
+        }
     }
     appendHistory(m_history, m_mono.data(), count);
     appendHistory(m_historyL, m_scratch.data(), count);
@@ -524,16 +718,30 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     }
 }
 
-- (BlurRange)blurRange:(int)level {
-    const std::string n = "blur" + std::to_string(level + 1);
-    BlurRange r{static_cast<float>(m_player->frameValue(n + "_min")), static_cast<float>(m_player->frameValue(n + "_max"))};
-    if (!std::isfinite(r.min)) r.min = 0.0f;
-    if (!std::isfinite(r.max)) r.max = 1.0f;
-    // MilkDrop keeps each range at least 0.1 wide so the 8-bit encoding stays usable.
-    if (r.max - r.min < 0.1f) {
-        const float mid = (r.min + r.max) * 0.5f;
-        r.min = mid - 0.05f;
-        r.max = mid + 0.05f;
+// The three blur levels' ranges, as MilkDrop's GetSafeBlurMinMax makes them: each at least 0.1
+// wide, and each inside the range of the level before it, so precision is not wasted.
+- (std::array<BlurRange, 3>)blurRanges {
+    std::array<BlurRange, 3> r;
+    for (int i = 0; i < 3; ++i) {
+        const std::string n = "blur" + std::to_string(i + 1);
+        r[i].min = static_cast<float>(m_player->frameValue(n + "_min"));
+        r[i].max = static_cast<float>(m_player->frameValue(n + "_max"));
+        if (!std::isfinite(r[i].min)) r[i].min = 0.0f;
+        if (!std::isfinite(r[i].max)) r[i].max = 1.0f;
+    }
+    constexpr float MIN_DISTANCE = 0.1f;
+    auto widen = [&](BlurRange& range) {
+        if (range.max - range.min < MIN_DISTANCE) {
+            const float mid = (range.min + range.max) * 0.5f;
+            range.min = mid - MIN_DISTANCE * 0.5f;
+            range.max = mid + MIN_DISTANCE * 0.5f;
+        }
+    };
+    widen(r[0]);
+    for (int i = 1; i < 3; ++i) {
+        r[i].max = std::min(r[i - 1].max, r[i].max);
+        r[i].min = std::max(r[i - 1].min, r[i].min);
+        widen(r[i]);
     }
     return r;
 }
@@ -545,64 +753,78 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     const float aspectX = (h > w) ? w / h : 1.0f;
     const float aspectY = (w > h) ? h / w : 1.0f;
     const float t = m_time;
+    const float sincePreset = m_time - m_presetStartTime;
+    const float presetTime = sincePreset - static_cast<int>(sincePreset / 10000.0f) * 10000.0f;
     std::uniform_real_distribution<float> unit(0.0f, 1.0f);
     BlurRange blur[3];
-    for (int i = 0; i < 3; ++i) blur[i] = [self blurRange:i];
+    const std::array<BlurRange, 3> ranges = [self blurRanges];
+    for (int i = 0; i < 3; ++i) blur[i] = ranges[i];
     const auto& rp = m_randPreset;
 
     out.vectors["rand_frame"] = {unit(m_random), unit(m_random), unit(m_random), unit(m_random)};
     out.vectors["rand_preset"] = rp;
     out.vectors["_c0"] = {aspectX, aspectY, 1.0f / aspectX, 1.0f / aspectY};
     out.vectors["_c1"] = {0.0f, 0.0f, 0.0f, 0.0f};
-    out.vectors["_c2"] = {t, fps, static_cast<float>(m_presetFrame), static_cast<float>(m_player->frameValue("progress"))};
-    out.vectors["_c3"] = {a.bass, a.mid, a.treb, (a.bass + a.mid + a.treb) / 3.0f};
-    out.vectors["_c4"] = {a.bassAtt, a.midAtt, a.trebAtt, (a.bassAtt + a.midAtt + a.trebAtt) / 3.0f};
+    out.vectors["_c2"] = {presetTime, fps, static_cast<float>(m_frame), static_cast<float>(m_player->frameValue("progress"))};
+    // MilkDrop writes vol as 0.3333f * (bass, mid, treb), a comma expression that keeps only treb.
+    out.vectors["_c3"] = {a.bass, a.mid, a.treb, 0.3333f * a.treb};
+    out.vectors["_c4"] = {a.bassAtt, a.midAtt, a.trebAtt, 0.3333f * a.trebAtt};
     out.vectors["_c5"] = {blur[0].max - blur[0].min, blur[0].min, blur[1].max - blur[1].min, blur[1].min};
     out.vectors["_c6"] = {blur[2].max - blur[2].min, blur[2].min, blur[0].min, blur[0].max};
     out.vectors["_c7"] = {w, h, 1.0f / w, 1.0f / h};
     const float roam[4] = {0.329f, 1.293f, 5.070f, 20.051f};
-    const float slow[4] = {0.0050f, 0.0083f, 0.0130f, 0.0220f};
+    const float roamPhase[4] = {1.2f, 3.9f, 2.5f, 5.4f};
+    const float slow[4] = {0.0050f, 0.0085f, 0.0133f, 0.0217f};
+    const float slowPhase[4] = {2.7f, 5.3f, 4.5f, 3.8f};
     std::array<float, 4> c8, c9, c10, c11;
     for (int i = 0; i < 4; ++i) {
-        c8[i] = 0.5f + 0.5f * std::cos(t * roam[i] + rp[i] * 6.28f);
-        c9[i] = 0.5f + 0.5f * std::sin(t * roam[i] + rp[i] * 6.28f);
-        c10[i] = 0.5f + 0.5f * std::cos(t * slow[i] + rp[i] * 6.28f);
-        c11[i] = 0.5f + 0.5f * std::sin(t * slow[i] + rp[i] * 6.28f);
+        c8[i] = 0.5f + 0.5f * std::cos(t * roam[i] + roamPhase[i]);
+        c9[i] = 0.5f + 0.5f * std::sin(t * roam[i] + roamPhase[i]);
+        c10[i] = 0.5f + 0.5f * std::cos(t * slow[i] + slowPhase[i]);
+        c11[i] = 0.5f + 0.5f * std::sin(t * slow[i] + slowPhase[i]);
     }
     out.vectors["_c8"] = c8;
     out.vectors["_c9"] = c9;
     out.vectors["_c10"] = c10;
     out.vectors["_c11"] = c11;
-    out.vectors["_c12"] = {1.0f, 1.0f, 0.5f, 0.0f};
+    // MilkDrop uses the width for both, so mip_x equals mip_y.
+    const float mip = std::log(w) / std::log(2.0f);
+    out.vectors["_c12"] = {mip, mip, mip, 0.0f};
     out.vectors["_c13"] = {blur[1].min, blur[1].max, blur[2].min, blur[2].max};
     const char* qNames[8] = {"_qa", "_qb", "_qc", "_qd", "_qe", "_qf", "_qg", "_qh"};
     for (int i = 0; i < 8; ++i) {
         out.vectors[qNames[i]] = {m_player->q(i * 4), m_player->q(i * 4 + 1), m_player->q(i * 4 + 2), m_player->q(i * 4 + 3)};
     }
 
-    // Rotation matrices: static (s), then slow to ultra-fast spins (d, f, vf, uf), and a fresh
-    // random one each frame (rand). Axes and phases come from the preset's seed.
-    const struct { const char* name; float speed; } GROUPS[] = {
-        {"rot_s", 0.0f}, {"rot_d", 0.02f}, {"rot_f", 0.1f}, {"rot_vf", 0.4f}, {"rot_uf", 1.6f},
-    };
+    // Rotation matrices: 20 per-preset ones (s, d, f, vf, uf in groups of four) that spin faster
+    // the higher their index, and four fresh random ones each frame. A preset's translation, base
+    // angles and spin directions come from its seed.
+    const char* GROUPS[] = {"rot_s", "rot_d", "rot_f", "rot_vf", "rot_uf"};
     std::mt19937 seeded(m_presetSeed);
-    std::uniform_real_distribution<float> signedUnit(-1.0f, 1.0f);
-    for (const auto& g : GROUPS) {
-        for (int k = 1; k <= 4; ++k) {
-            float angle[3];
-            for (float& v : angle) v = signedUnit(seeded) * 3.14159f + signedUnit(seeded) * g.speed * t;
-            out.matrices[std::string(g.name) + std::to_string(k)] = rotation(angle[0], angle[1], angle[2]);
-        }
+    std::uniform_real_distribution<float> seedUnit(0.0f, 1.0f);
+    for (int k = 0; k < 20; ++k) {
+        float translate[3], base[3], speed[3];
+        for (float& v : translate) v = seedUnit(seeded) * 2.0f - 1.0f;
+        for (float& v : base) v = seedUnit(seeded) * 6.28f;
+        const float spin = 0.9f * std::pow(k / 8.0f, 3.2f);
+        for (float& v : speed) v = (seedUnit(seeded) * 2.0f - 1.0f) * spin;
+        out.matrices[std::string(GROUPS[k / 4]) + std::to_string(k % 4 + 1)] =
+            shaderMatrix(base[0] + speed[0] * t, base[1] + speed[1] * t, base[2] + speed[2] * t, translate[0], translate[1], translate[2]);
     }
     for (int k = 1; k <= 4; ++k) {
-        out.matrices["rot_rand" + std::to_string(k)] =
-            rotation(unit(m_random) * 6.28f, unit(m_random) * 6.28f, unit(m_random) * 6.28f);
+        const float ax = unit(m_random) * 6.28f, ay = unit(m_random) * 6.28f, az = unit(m_random) * 6.28f;
+        const float tx = unit(m_random), ty = unit(m_random), tz = unit(m_random);
+        out.matrices["rot_rand" + std::to_string(k)] = shaderMatrix(ax, ay, az, tx, ty, tz);
     }
     return out;
 }
 
 // MilkDrop 2's hue_shader corner colours, which drift slowly with time.
-- (void)hueCorners:(float*)out {
+// The drifting corner tints: top-left, top-right, bottom-left, bottom-right. MilkDrop's classic
+// composite scales them by fShader and skips them when it is zero. The comp shader path always
+// uses them, with the right pair swapped for the left.
+- (void)hueCorners:(float*)out classic:(BOOL)classic {
+    const float amount = classic ? static_cast<float>(m_player->baseValue("fshader", 0.0)) : 1.0f;
     for (int i = 0; i < 4; ++i) {
         float c[3] = {
             0.6f + 0.3f * std::sin(m_time * 30.0f * 0.0143f + 3.0f + i * 21.0f + m_randPreset[3]),
@@ -610,21 +832,32 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
             0.6f + 0.3f * std::sin(m_time * 30.0f * 0.0129f + 6.0f + i * 9.0f + m_randPreset[2]),
         };
         const float peak = std::max({c[0], c[1], c[2]});
-        for (int k = 0; k < 3; ++k) out[i * 4 + k] = 0.5f + 0.5f * c[k] / peak;
+        for (int k = 0; k < 3; ++k) {
+            const float shade = 0.5f + 0.5f * c[k] / peak;
+            out[i * 4 + k] = amount > 0.001f ? shade * amount + (1.0f - amount) : 1.0f;
+        }
         out[i * 4 + 3] = 1.0f;
+    }
+    if (!classic) {
+        // The comp shader's corners run top-right, top-left, bottom-right, bottom-left.
+        for (int k = 0; k < 4; ++k) {
+            std::swap(out[k], out[4 + k]);
+            std::swap(out[8 + k], out[12 + k]);
+        }
     }
 }
 
 - (void)encodeBlurPass:(id<MTLCommandBuffer>)commands
-                source:(id<MTLTexture>)source
-                target:(id<MTLTexture>)target
-              uniforms:(const BlurUniforms&)uniforms {
+             pipeline:(id<MTLRenderPipelineState>)pipeline
+               source:(id<MTLTexture>)source
+               target:(id<MTLTexture>)target
+             uniforms:(const BlurUniforms&)uniforms {
     MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = target;
     pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:pass];
-    [encoder setRenderPipelineState:m_blurPipeline];
+    [encoder setRenderPipelineState:pipeline];
     [encoder setFragmentTexture:source atIndex:0];
     [encoder setFragmentSamplerState:m_clampSampler atIndex:0];
     [encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
@@ -632,21 +865,27 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     [encoder endEncoding];
 }
 
-// Builds blur1..levels from the finished frame. Each level halves the size and runs a horizontal
-// then a vertical Gaussian pass, storing the result in its own 0..1 range.
+// Builds blur1..levels from the finished frame, as MilkDrop does. The horizontal pass also
+// converts the source's stored range to this level's, and only the first level darkens the edges.
 - (void)encodeBlur:(id<MTLCommandBuffer>)commands from:(id<MTLTexture>)image levels:(int)levels {
-    float decodeScale = 1.0f;
-    float decodeBias = 0.0f;
+    const std::array<BlurRange, 3> range = [self blurRanges];
+    float scale[3], bias[3];
+    scale[0] = 1.0f / (range[0].max - range[0].min);
+    bias[0] = -range[0].min * scale[0];
+    for (int i = 1; i < 3; ++i) {
+        const float span = range[i - 1].max - range[i - 1].min;
+        const float lo = (range[i].min - range[i - 1].min) / span;
+        const float hi = (range[i].max - range[i - 1].min) / span;
+        scale[i] = 1.0f / (hi - lo);
+        bias[i] = -lo * scale[i];
+    }
     id<MTLTexture> source = image;
     for (int level = 0; level < levels; ++level) {
-        const BlurRange range = [self blurRange:level];
-        const BlurUniforms horizontal{{1.0f, 0.0f}, decodeScale, decodeBias, 0.0f, 1.0f, 0.0f, 0.0f};
-        [self encodeBlurPass:commands source:source target:m_blurTemp[level] uniforms:horizontal];
+        const BlurUniforms horizontal{scale[level], bias[level], 0.0f, 0.0f};
+        [self encodeBlurPass:commands pipeline:m_blurHorizontalPipeline source:source target:m_blurTemp[level] uniforms:horizontal];
         const float edge = level == 0 ? static_cast<float>(m_player->frameValue("blur1_edge_darken")) : 0.0f;
-        const BlurUniforms vertical{{0.0f, 1.0f}, 1.0f, 0.0f, range.min, 1.0f / (range.max - range.min), edge, 0.0f};
-        [self encodeBlurPass:commands source:m_blurTemp[level] target:m_blur[level] uniforms:vertical];
-        decodeScale = range.max - range.min;
-        decodeBias = range.min;
+        const BlurUniforms vertical{1.0f, 0.0f, edge, 0.0f};
+        [self encodeBlurPass:commands pipeline:m_blurVerticalPipeline source:m_blurTemp[level] target:m_blur[level] uniforms:vertical];
         source = m_blur[level];
     }
 }
@@ -655,7 +894,7 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
 // the passes add up to max(gamma, 1), without it to gamma.
 - (void)encodeClassicComposite:(id<MTLRenderCommandEncoder>)encoder image:(id<MTLTexture>)image {
     auto flag = [&](const char* name) { return std::fabs(m_player->frameValue(name)) > 0.00001 ? 1 : 0; };
-    const float gamma = static_cast<float>(m_player->frameValue("gamma"));
+    const float gamma = std::clamp(static_cast<float>(m_player->frameValue("gamma")), 0.0f, 8.0f);
     const float echoAlpha = static_cast<float>(m_player->frameValue("echo_alpha"));
     ClassicUniforms uniforms{
         echoAlpha > 0.001f ? std::max(gamma, 1.0f) : gamma,
@@ -668,7 +907,7 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
         flag("invert"),
     };
     float corners[16];
-    [self hueCorners:corners];
+    [self hueCorners:corners classic:YES];
     id<MTLBuffer> grid = [m_device newBufferWithBytes:m_gridBase.data()
                                                length:m_gridBase.size() * sizeof(WarpVertex)
                                               options:MTLResourceStorageModeShared];
@@ -709,8 +948,8 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     s.scale = static_cast<float>(p.baseValue("wave_scale", 1.0));
     s.smoothing = static_cast<float>(p.baseValue("wave_smoothing", 0.75));
     s.time = m_time;
-    s.vol = (levels.bass + levels.mid + levels.treb) / 3.0f;
-    s.treb = levels.treb;
+    s.vol = 0.333f * (levels.bass + levels.mid + levels.treb);
+    s.treb = m_bands ? m_bands->rawTreble() : levels.treb;
     return s;
 }
 
@@ -752,8 +991,8 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     const float length = value("mv_l");
     const int width = static_cast<int>(image.width);
     const int height = static_cast<int>(image.height);
-    const float minX = 1.25f / width, minY = 1.25f / height;
-    const float minimum = std::sqrt(minX * minX + minY * minY);
+    // MilkDrop's shortest trail is one pixel of the image's width, in texture units.
+    const float minimum = 1.0f / width;
     const float colour[4] = {std::clamp(value("mv_r"), 0.0f, 1.0f), std::clamp(value("mv_g"), 0.0f, 1.0f),
                              std::clamp(value("mv_b"), 0.0f, 1.0f), std::min(alpha, 1.0f)};
 
@@ -1002,17 +1241,14 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
         id<MTLRenderCommandEncoder> composite = [commands renderCommandEncoderWithDescriptor:screenPass];
         if (gpu != nullptr && gpu->hasComp()) {
             float corners[16];
-            [self hueCorners:corners];
-            id<MTLBuffer> compGrid = [m_device newBufferWithBytes:m_gridBase.data()
-                                                           length:m_gridBase.size() * sizeof(WarpVertex)
-                                                          options:MTLResourceStorageModeShared];
+            [self hueCorners:corners classic:NO];
             gpu->bindComp(composite, back, m_blur, f.wrap, values);
-            [composite setVertexBuffer:compGrid offset:0 atIndex:0];
+            [composite setVertexBuffer:m_compGrid offset:0 atIndex:0];
             [composite setVertexBytes:corners length:sizeof(corners) atIndex:1];
             [composite drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-                                  indexCount:m_meshIndexCount
+                                  indexCount:m_compIndexCount
                                    indexType:MTLIndexTypeUInt16
-                                 indexBuffer:m_meshIndices
+                                 indexBuffer:m_compIndices
                            indexBufferOffset:0];
         } else if (presetMode && m_compVersion == 0) {
             [self encodeClassicComposite:composite image:back];
@@ -1028,7 +1264,7 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
         [composite endEncoding];
     }
     m_front = 1 - m_front;
-    ++m_presetFrame;
+    ++m_frame;
 }
 
 @end

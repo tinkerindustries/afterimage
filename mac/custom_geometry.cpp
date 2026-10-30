@@ -119,7 +119,9 @@ void CustomGeometry::addWave(const CustomWaveOutput& wave) {
     }
     startBatch(wave.additive, false, -1);
     if (wave.dots) {
-        const float half = (wave.thick ? 1.0f : 0.5f) * m_pixel;
+        // MilkDrop's point size: 1 pixel below a 1024 pixel texture and 2 from there up, plus 1 when thick.
+        const float side = static_cast<float>((m_width >= 1024 ? 2 : 1) + (wave.thick ? 1 : 0));
+        const float half = 0.5f * side * m_pixel;
         for (size_t i = 0; i < wave.points.size(); ++i) {
             const CustomWavePoint& p = wave.points[i];
             const float c[4] = {p.r, p.g, p.b, p.a};

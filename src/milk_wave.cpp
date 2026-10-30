@@ -10,8 +10,7 @@ namespace {
 using Point = std::array<float, 2>;
 using Line = std::vector<Point>;
 
-// Room past the waveform for modes that read 32 samples ahead. Those samples start at 0 and
-// pick up the smoothing filter's tail.
+// The waveform plus the 32 samples that some modes read past its end.
 constexpr int PCM_SIZE = 512;
 
 enum Mode {
@@ -193,9 +192,10 @@ void smooth(const Line& in, Line& out) {
     out.push_back(in[n - 1]);
 }
 
-// Modes 2 and 5 scale alpha down, and mode 3 also ties it to treble. The factors grow with the
-// image's larger side, so dense modes look the same at different sizes.
-float modeAlpha(int mode, float alpha, int texsize, float treb) {
+// MilkDrop scales alpha by mode: mode 1 gains a quarter, modes 2 and 5 are scaled down, and mode 3
+// replaces it with a fixed value tied to the treble sum. The factors grow with the image's larger
+// side, so dense modes look the same at different sizes.
+float modeAlpha(int mode, float alpha, int texsize, float trebSum) {
     auto pick = [&](float a, float b, float c, float d, float e) {
         if (texsize <= 256) return a;
         if (texsize <= 512) return b;
@@ -203,8 +203,9 @@ float modeAlpha(int mode, float alpha, int texsize, float treb) {
         if (texsize <= 2048) return d;
         return e;
     };
+    if (mode == MODE_XY_SPIRAL) return alpha * 1.25f;
     if (mode == MODE_SPIRO || mode == MODE_EXPLOSIVE_HASH) return alpha * pick(0.07f, 0.09f, 0.11f, 0.13f, 0.15f);
-    if (mode == MODE_SPIRO_VOLUME) return alpha * pick(0.075f, 0.15f, 0.22f, 0.33f, 0.44f) * 1.3f * treb * treb;
+    if (mode == MODE_SPIRO_VOLUME) return pick(0.075f, 0.15f, 0.22f, 0.33f, 0.44f) * 1.3f * trebSum * trebSum;
     return alpha;
 }
 
@@ -230,8 +231,8 @@ void buildMainWave(const MainWaveSettings& s, const MilkAudioFrame& audio, int w
 
     // Each sample is scaled by fWaveScale / 128 and smoothed with a one-pole filter whose
     // feedback is fWaveSmoothing.
-    std::copy(audio.waveL.begin(), audio.waveL.end(), c.l.begin());
-    std::copy(audio.waveR.begin(), audio.waveR.end(), c.r.begin());
+    std::copy(audio.waveL.begin(), audio.waveL.begin() + PCM_SIZE, c.l.begin());
+    std::copy(audio.waveR.begin(), audio.waveR.begin() + PCM_SIZE, c.r.begin());
     const float scale = s.scale / 128.0f;
     const float mix2 = s.smoothing;
     const float mix1 = scale * (1.0f - mix2);
@@ -249,9 +250,9 @@ void buildMainWave(const MainWaveSettings& s, const MilkAudioFrame& audio, int w
 
     float alpha = modeAlpha(mode, s.alpha, std::max(width, height), s.treb);
     if (s.modAlphaByVolume) {
-        if (s.vol <= s.modAlphaStart) alpha = 0.0f;
-        else if (s.vol >= s.modAlphaEnd) alpha = s.alpha;
-        else alpha = s.alpha * (s.vol - s.modAlphaStart) / (s.modAlphaEnd - s.modAlphaStart);
+        float ratio = (s.vol - s.modAlphaStart) / (s.modAlphaEnd - s.modAlphaStart);
+        if (!std::isfinite(ratio)) ratio = s.vol > s.modAlphaStart ? 1e9f : 0.0f;
+        alpha *= ratio;
     }
     out.a = std::clamp(alpha, 0.0f, 1.0f);
     // MilkDrop passes vertex colours as bytes, so each channel is clamped to 0..1.

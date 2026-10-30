@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <stdexcept>
 
 namespace Milk {
@@ -11,11 +13,20 @@ namespace {
 
 constexpr double EPSILON = 0.00001;
 constexpr int MAX_LOOP = 1 << 20;
-constexpr size_t MEGABUF_SIZE = 1 << 20;
+constexpr size_t MEGABUF_SIZE = 1 << 23;
+// Added to a memory index before it is truncated, so 2.9999999 reaches slot 3.
+constexpr double MEM_ROUND = 0.0001;
 
 bool truthy(double x) { return std::fabs(x) > EPSILON; }
 
-double safeDiv(double a, double b) { return b == 0.0 ? 0.0 : a / b; }
+double safeDiv(double a, double b) { return std::fabs(b) < EPSILON ? 0.0 : a / b; }
+
+// pow with ns-eel's guards: zero to a negative power and NaN results are 0.
+double safePow(double a, double b) {
+    if (std::fabs(a) < EPSILON && b < 0.0) return 0.0;
+    const double r = std::pow(a, b);
+    return std::isnan(r) ? 0.0 : r;
+}
 
 double intMod(double a, double b) {
     const long long d = static_cast<long long>(std::fabs(b));
@@ -38,7 +49,7 @@ enum class Kind {
     Less, Greater, LessEq, GreaterEq, Equal, NotEqual,
     And, Or, BitAnd, BitOr,
     If, Seq, Loop, While,
-    Fn1, Fn2, Rand,
+    Fn1, Fn2, Rand, MemCopy, MemFill,
 };
 
 } // namespace
@@ -61,7 +72,7 @@ namespace {
 
 double* memRef(std::vector<double>& buffer, double index) {
     if (!(index >= 0.0) || index >= static_cast<double>(MEGABUF_SIZE)) return nullptr;
-    const size_t i = static_cast<size_t>(index + EPSILON);
+    const size_t i = static_cast<size_t>(index + MEM_ROUND);
     if (i >= buffer.size()) buffer.resize(std::min(MEGABUF_SIZE, std::max(i + 1, buffer.size() * 2)), 0.0);
     return &buffer[i];
 }
@@ -96,7 +107,9 @@ double ExprNode::eval() const {
         case '*': *target *= rhs; break;
         case '/': *target = safeDiv(*target, rhs); break;
         case '%': *target = intMod(*target, rhs); break;
-        case '^': *target = std::pow(*target, rhs); break;
+        case '^': *target = safePow(*target, rhs); break;
+        case '&': *target = static_cast<double>(static_cast<long long>(*target) & static_cast<long long>(rhs)); break;
+        case '|': *target = static_cast<double>(static_cast<long long>(*target) | static_cast<long long>(rhs)); break;
         default: *target = rhs; break;
         }
         return *target;
@@ -108,7 +121,7 @@ double ExprNode::eval() const {
     case Kind::Mul: return kids[0]->eval() * kids[1]->eval();
     case Kind::Div: return safeDiv(kids[0]->eval(), kids[1]->eval());
     case Kind::Mod: return intMod(kids[0]->eval(), kids[1]->eval());
-    case Kind::Pow: return std::pow(kids[0]->eval(), kids[1]->eval());
+    case Kind::Pow: return safePow(kids[0]->eval(), kids[1]->eval());
     case Kind::Less: return kids[0]->eval() < kids[1]->eval() ? 1.0 : 0.0;
     case Kind::Greater: return kids[0]->eval() > kids[1]->eval() ? 1.0 : 0.0;
     case Kind::LessEq: return kids[0]->eval() <= kids[1]->eval() ? 1.0 : 0.0;
@@ -140,6 +153,34 @@ double ExprNode::eval() const {
         while (truthy(kids[0]->eval()) && ++n < MAX_LOOP) {}
         return 0.0;
     }
+    case Kind::MemCopy:
+    case Kind::MemFill: {
+        const long long total = static_cast<long long>(MEGABUF_SIZE);
+        const double first = kids[0]->eval();
+        const double second = kids[1]->eval();
+        long long count = static_cast<long long>(kids[2]->eval() + MEM_ROUND);
+        long long dest = static_cast<long long>(first + MEM_ROUND);
+        long long src = static_cast<long long>(second + MEM_ROUND);
+        std::vector<double>& buffer = vars->megabuf();
+        if (kind == Kind::MemFill) {
+            if (dest < 0) { count += dest; dest = 0; }
+            count = std::min(count, total - dest);
+            if (count > 0) {
+                if (buffer.size() < static_cast<size_t>(dest + count)) buffer.resize(static_cast<size_t>(dest + count), 0.0);
+                std::fill(buffer.begin() + dest, buffer.begin() + dest + count, second);
+            }
+            return first;
+        }
+        if (dest < 0) { count += dest; src -= dest; dest = 0; }
+        if (src < 0) { count += src; dest -= src; src = 0; }
+        count = std::min({count, total - dest, total - src});
+        if (count > 0) {
+            const size_t need = static_cast<size_t>(std::max(dest, src) + count);
+            if (buffer.size() < need) buffer.resize(need, 0.0);
+            std::memmove(buffer.data() + dest, buffer.data() + src, static_cast<size_t>(count) * sizeof(double));
+        }
+        return first;
+    }
     case Kind::Fn1: return fn1(kids[0]->eval());
     case Kind::Fn2: return fn2(kids[0]->eval(), kids[1]->eval());
     case Kind::Rand: {
@@ -156,11 +197,20 @@ namespace {
 // Function tables. Each takes and returns doubles the way ns-eel2's built-ins do.
 double fnSqr(double x) { return x * x; }
 double fnSqrt(double x) { return std::sqrt(std::fabs(x)); }
-double fnInvSqrt(double x) { return x == 0.0 ? 0.0 : 1.0 / std::sqrt(std::fabs(x)); }
+// MilkDrop's fast inverse square root: a bit trick and one Newton step, good to about 0.2%.
+double fnInvSqrt(double x) {
+    uint64_t bits;
+    std::memcpy(&bits, &x, sizeof(bits));
+    bits = 0x5fe6eb50c7b537a9ULL - (bits >> 1);
+    double y;
+    std::memcpy(&y, &bits, sizeof(y));
+    y = y * (1.5 - (x * 0.5) * y * y);
+    return std::isnan(y) ? 0.0 : y;
+}
 double fnSign(double x) { return x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 0.0); }
 double fnBnot(double x) { return truthy(x) ? 0.0 : 1.0; }
-double fnLog(double x) { return x > 0.0 ? std::log(x) : -1e30; }
-double fnLog10(double x) { return x > 0.0 ? std::log10(x) : -1e30; }
+double fnLog(double x) { return x > 0.0 ? std::log(x) : 0.0; }
+double fnLog10(double x) { return x > 0.0 ? std::log10(x) : 0.0; }
 double fnAbove(double a, double b) { return a > b ? 1.0 : 0.0; }
 double fnBelow(double a, double b) { return a < b ? 1.0 : 0.0; }
 double fnEqual(double a, double b) { return std::fabs(a - b) < EPSILON ? 1.0 : 0.0; }
@@ -168,8 +218,7 @@ double fnBand(double a, double b) { return truthy(a) && truthy(b) ? 1.0 : 0.0; }
 double fnBor(double a, double b) { return truthy(a) || truthy(b) ? 1.0 : 0.0; }
 double fnMin(double a, double b) { return std::min(a, b); }
 double fnMax(double a, double b) { return std::max(a, b); }
-double fnPow(double a, double b) { return std::pow(a, b); }
-double fnFmod(double a, double b) { return b == 0.0 ? 0.0 : std::fmod(a, b); }
+double fnPow(double a, double b) { return safePow(a, b); }
 double fnAtan2(double a, double b) { return std::atan2(a, b); }
 double fnSigmoid(double x, double c) {
     const double t = 1.0 + std::exp(-x * c);
@@ -199,7 +248,7 @@ const Fn1Entry FN1[] = {
 const Fn2Entry FN2[] = {
     {"atan2", fnAtan2}, {"pow", fnPow}, {"min", fnMin}, {"max", fnMax}, {"above", fnAbove},
     {"below", fnBelow}, {"equal", fnEqual}, {"band", fnBand}, {"bor", fnBor},
-    {"sigmoid", fnSigmoid}, {"fmod", fnFmod},
+    {"sigmoid", fnSigmoid},
 };
 
 struct Token {
@@ -214,7 +263,7 @@ public:
 };
 
 std::vector<Token> tokenise(const std::string& src) {
-    static const char* MULTI[] = {"+=", "-=", "*=", "/=", "%=", "^=", "==", "!=", "<=", ">=", "&&", "||"};
+    static const char* MULTI[] = {"+=", "-=", "*=", "/=", "%=", "^=", "&=", "|=", "==", "!=", "<=", ">=", "&&", "||"};
     std::vector<Token> out;
     size_t i = 0;
     const size_t n = src.size();
@@ -252,6 +301,13 @@ std::vector<Token> tokenise(const std::string& src) {
             out.push_back(t);
             continue;
         }
+        if (c == '$' && i + 3 < n && src[i + 1] == '\'' && src[i + 3] == '\'') {
+            Token t{Token::NUM};
+            t.value = static_cast<unsigned char>(src[i + 2]);
+            out.push_back(t);
+            i += 4;
+            continue;
+        }
         if (c == '$') {
             size_t j = i + 1;
             while (j < n && (std::isalnum(static_cast<unsigned char>(src[j])) || src[j] == '_')) ++j;
@@ -286,7 +342,7 @@ std::vector<Token> tokenise(const std::string& src) {
             }
         }
         if (matched) continue;
-        if (std::string("+-*/%^=<>!&|?:(),;").find(c) != std::string::npos) {
+        if (std::string("+-*/%^=<>!&|?:(),;[]").find(c) != std::string::npos) {
             out.push_back(Token{Token::OP, std::string(1, c)});
             ++i;
             continue;
@@ -350,7 +406,7 @@ private:
 
     NodePtr parseAssign() {
         NodePtr lhs = parseTernary();
-        static const char* OPS[] = {"=", "+=", "-=", "*=", "/=", "%=", "^="};
+        static const char* OPS[] = {"=", "+=", "-=", "*=", "/=", "%=", "^=", "&=", "|="};
         for (const char* op : OPS) {
             if (isOp(op)) {
                 if (lhs->kind != Kind::Var && lhs->kind != Kind::Mem && lhs->kind != Kind::GMem) {
@@ -375,6 +431,9 @@ private:
         return node;
     }
 
+    // From here down the levels follow ns-eel's grammar, loosest first: || && | & == > < + * % !
+    // ^ and then unary minus. Note that | and & bind looser than comparisons, % binds tighter than
+    // * and /, ^ is left associative, and unary minus binds tighter than ^ so -a^b is (-a)^b.
     NodePtr parseOr() {
         NodePtr lhs = parseAnd();
         while (accept("||")) lhs = makeBinary(Kind::Or, std::move(lhs), parseAnd());
@@ -382,31 +441,46 @@ private:
     }
 
     NodePtr parseAnd() {
-        NodePtr lhs = parseCompare();
-        while (accept("&&")) lhs = makeBinary(Kind::And, std::move(lhs), parseCompare());
+        NodePtr lhs = parseBitOr();
+        while (accept("&&")) lhs = makeBinary(Kind::And, std::move(lhs), parseBitOr());
         return lhs;
     }
 
-    NodePtr parseCompare() {
-        NodePtr lhs = parseBits();
+    NodePtr parseBitOr() {
+        NodePtr lhs = parseBitAnd();
+        while (accept("|")) lhs = makeBinary(Kind::BitOr, std::move(lhs), parseBitAnd());
+        return lhs;
+    }
+
+    NodePtr parseBitAnd() {
+        NodePtr lhs = parseEquality();
+        while (accept("&")) lhs = makeBinary(Kind::BitAnd, std::move(lhs), parseEquality());
+        return lhs;
+    }
+
+    NodePtr parseEquality() {
+        NodePtr lhs = parseGreater();
         while (true) {
-            Kind kind;
-            if (accept("<")) kind = Kind::Less;
-            else if (accept(">")) kind = Kind::Greater;
-            else if (accept("<=")) kind = Kind::LessEq;
-            else if (accept(">=")) kind = Kind::GreaterEq;
-            else if (accept("==")) kind = Kind::Equal;
-            else if (accept("!=")) kind = Kind::NotEqual;
+            if (accept("==")) lhs = makeBinary(Kind::Equal, std::move(lhs), parseGreater());
+            else if (accept("!=")) lhs = makeBinary(Kind::NotEqual, std::move(lhs), parseGreater());
             else return lhs;
-            lhs = makeBinary(kind, std::move(lhs), parseBits());
         }
     }
 
-    NodePtr parseBits() {
+    NodePtr parseGreater() {
+        NodePtr lhs = parseLess();
+        while (true) {
+            if (accept(">")) lhs = makeBinary(Kind::Greater, std::move(lhs), parseLess());
+            else if (accept(">=")) lhs = makeBinary(Kind::GreaterEq, std::move(lhs), parseLess());
+            else return lhs;
+        }
+    }
+
+    NodePtr parseLess() {
         NodePtr lhs = parseAdd();
         while (true) {
-            if (accept("|")) lhs = makeBinary(Kind::BitOr, std::move(lhs), parseAdd());
-            else if (accept("&")) lhs = makeBinary(Kind::BitAnd, std::move(lhs), parseAdd());
+            if (accept("<")) lhs = makeBinary(Kind::Less, std::move(lhs), parseAdd());
+            else if (accept("<=")) lhs = makeBinary(Kind::LessEq, std::move(lhs), parseAdd());
             else return lhs;
         }
     }
@@ -421,13 +495,33 @@ private:
     }
 
     NodePtr parseMul() {
-        NodePtr lhs = parseUnary();
+        NodePtr lhs = parseMod();
         while (true) {
-            if (accept("*")) lhs = makeBinary(Kind::Mul, std::move(lhs), parseUnary());
-            else if (accept("/")) lhs = makeBinary(Kind::Div, std::move(lhs), parseUnary());
-            else if (accept("%")) lhs = makeBinary(Kind::Mod, std::move(lhs), parseUnary());
+            if (accept("*")) lhs = makeBinary(Kind::Mul, std::move(lhs), parseMod());
+            else if (accept("/")) lhs = makeBinary(Kind::Div, std::move(lhs), parseMod());
             else return lhs;
         }
+    }
+
+    NodePtr parseMod() {
+        NodePtr lhs = parseNot();
+        while (accept("%")) lhs = makeBinary(Kind::Mod, std::move(lhs), parseNot());
+        return lhs;
+    }
+
+    NodePtr parseNot() {
+        if (accept("!")) {
+            NodePtr node = makeNode(Kind::Not);
+            node->kids.push_back(parseNot());
+            return node;
+        }
+        return parsePower();
+    }
+
+    NodePtr parsePower() {
+        NodePtr lhs = parseUnary();
+        while (accept("^")) lhs = makeBinary(Kind::Pow, std::move(lhs), parseUnary());
+        return lhs;
     }
 
     NodePtr parseUnary() {
@@ -442,13 +536,24 @@ private:
             node->kids.push_back(parseUnary());
             return node;
         }
-        return parsePow();
+        return parsePostfix();
     }
 
-    NodePtr parsePow() {
-        NodePtr base = parsePrimary();
-        if (accept("^")) return makeBinary(Kind::Pow, std::move(base), parseUnary());
-        return base;
+    // `index[]` and `base[offset]` address megabuf, so `10000[5]` is megabuf(10005).
+    NodePtr parsePostfix() {
+        NodePtr node = parsePrimary();
+        while (accept("[")) {
+            NodePtr index = std::move(node);
+            if (!accept("]")) {
+                NodePtr offset = parseSequence();
+                expect("]");
+                index = makeBinary(Kind::Add, std::move(index), std::move(offset));
+            }
+            node = makeNode(Kind::Mem);
+            node->vars = &m_vars;
+            node->kids.push_back(std::move(index));
+        }
+        return node;
     }
 
     std::vector<NodePtr> parseArgs() {
@@ -493,6 +598,8 @@ private:
         else if (name == "rand") { need(1); node = makeNode(Kind::Rand); }
         else if (name == "megabuf") { need(1); node = makeNode(Kind::Mem); }
         else if (name == "gmegabuf") { need(1); node = makeNode(Kind::GMem); }
+        else if (name == "memcpy") { need(3); node = makeNode(Kind::MemCopy); }
+        else if (name == "memset") { need(3); node = makeNode(Kind::MemFill); }
         else if (name == "exec2" || name == "exec3") { need(name == "exec2" ? 2 : 3); node = makeNode(Kind::Seq); }
         else if (name == "assign") {
             need(2);
@@ -522,6 +629,13 @@ private:
         if (t.type == Token::IDENT) {
             const std::string name = t.text;
             ++m_pos;
+            if (name == "gmem" && accept("[")) {
+                NodePtr node = makeNode(Kind::GMem);
+                node->vars = &m_vars;
+                node->kids.push_back(isOp("]") ? makeNode(Kind::Const) : parseSequence());
+                expect("]");
+                return node;
+            }
             if (accept("(")) return parseCall(name);
             NodePtr node = makeNode(Kind::Var);
             node->var = m_vars.slot(name);

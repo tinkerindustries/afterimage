@@ -37,12 +37,12 @@ void fft(std::vector<std::complex<float>>& data) {
 
 // MilkDrop's analyser: a Hann window over the input, zero-padded to FFT_SIZE, and magnitudes
 // tilted up towards the treble by -0.02 * log((N - i) / N).
-void spectrum(const float* scaled, std::array<float, MILK_SPECTRUM_SAMPLES>& out) {
+void spectrum(const float* scaled, std::array<float, MILK_SPECTRUM_SAMPLES>& out, bool averagePairs) {
     std::vector<std::complex<float>> data(FFT_SIZE);
     float previous = scaled[0];
     for (int i = 0; i < MILK_FFT_INPUT; ++i) {
         const float window = 0.5f + 0.5f * std::sin(static_cast<float>(i) * 2.0f * PI / MILK_FFT_INPUT - PI * 0.5f);
-        data[i] = {0.5f * (scaled[i] + previous) * window, 0.0f};
+        data[i] = {(averagePairs ? 0.5f * (scaled[i] + previous) : scaled[i]) * window, 0.0f};
         previous = scaled[i];
     }
     fft(data);
@@ -54,6 +54,8 @@ void spectrum(const float* scaled, std::array<float, MILK_SPECTRUM_SAMPLES>& out
 
 } // namespace
 
+void computeSpectrum(const float* scaled, std::array<float, MILK_SPECTRUM_SAMPLES>& out) { spectrum(scaled, out, false); }
+
 void buildMilkAudioFrame(const float* left, const float* right, int count, MilkAudioFrame& out) {
     std::vector<float> l(MILK_FFT_INPUT, 0.0f), r(MILK_FFT_INPUT, 0.0f);
     const int n = std::min(count, MILK_FFT_INPUT);
@@ -61,10 +63,10 @@ void buildMilkAudioFrame(const float* left, const float* right, int count, MilkA
         l[MILK_FFT_INPUT - n + i] = left[count - n + i] * 128.0f;
         r[MILK_FFT_INPUT - n + i] = right[count - n + i] * 128.0f;
     }
-    std::copy(l.end() - MILK_WAVE_SAMPLES, l.end(), out.waveL.begin());
-    std::copy(r.end() - MILK_WAVE_SAMPLES, r.end(), out.waveR.begin());
-    spectrum(l.data(), out.spectrumL);
-    spectrum(r.data(), out.spectrumR);
+    std::copy(l.begin(), l.end(), out.waveL.begin());
+    std::copy(r.begin(), r.end(), out.waveR.begin());
+    spectrum(l.data(), out.spectrumL, true);
+    spectrum(r.data(), out.spectrumR, true);
 }
 
 } // namespace Milk

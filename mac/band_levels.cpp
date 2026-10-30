@@ -1,5 +1,7 @@
 #include "band_levels.h"
 
+#include "milk_audio.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -7,45 +9,45 @@ namespace Milk {
 
 namespace {
 
-constexpr float BASS_CUTOFF_HZ = 250.0f;
-constexpr float TREBLE_CUTOFF_HZ = 4000.0f;
-
-float onePoleCoeff(float cutoff, double sampleRate) {
-    return 1.0f - std::exp(-6.2831853f * cutoff / static_cast<float>(sampleRate));
-}
+// MilkDrop's AdjustRateToFPS: a per-frame rate tuned for 30 fps, converted to the actual rate.
+float adjustRate(float rate, float fps) { return std::pow(rate, 30.0f / fps); }
 
 } // namespace
 
-BandLevels::BandLevels(double sampleRate)
-    : m_lowCoeff(onePoleCoeff(BASS_CUTOFF_HZ, sampleRate)),
-      m_highCoeff(onePoleCoeff(TREBLE_CUTOFF_HZ, sampleRate)) {}
-
-void BandLevels::update(const float* samples, int count, float frameScale) {
+void BandLevels::update(const float* left, int count, float frameScale) {
     if (count <= 0) return;
-    double energy[3] = {0.0, 0.0, 0.0};
-    for (int i = 0; i < count; ++i) {
-        const float x = samples[i];
-        m_low += (x - m_low) * m_lowCoeff;
-        m_high += (x - m_high) * m_highCoeff;
-        const float bass = m_low;
-        const float mid = m_high - m_low;
-        const float treb = x - m_high;
-        energy[0] += bass * bass;
-        energy[1] += mid * mid;
-        energy[2] += treb * treb;
-    }
+    const int n = static_cast<int>(m_recent.size());
+    const int keep = std::max(0, n - count);
+    std::copy(m_recent.begin() + (n - keep), m_recent.end(), m_recent.begin());
+    const int fresh = std::min(count, n);
+    for (int i = 0; i < fresh; ++i) m_recent[keep + i] = left[count - fresh + i];
 
-    const float avgRate = 1.0f - std::pow(0.985f, frameScale);
-    const float attRate = 1.0f - std::pow(0.9f, frameScale);
+    std::array<float, MILK_FFT_INPUT> scaled;
+    for (int i = 0; i < MILK_FFT_INPUT; ++i) scaled[i] = m_recent[i] * 128.0f;
+    std::array<float, MILK_SPECTRUM_SAMPLES> spectrum;
+    computeSpectrum(scaled.data(), spectrum);
+
+    const float fps = 60.0f / std::max(frameScale, 0.01f);
+    float* imm = m_imm;
+    for (int b = 0; b < 3; ++b) {
+        const int start = MILK_SPECTRUM_SAMPLES * b / 6;
+        const int end = MILK_SPECTRUM_SAMPLES * (b + 1) / 6;
+        imm[b] = 0.0f;
+        for (int j = start; j < end; ++j) imm[b] += spectrum[j];
+    }
     float* level[3] = {&m_levels.bass, &m_levels.mid, &m_levels.treb};
     float* att[3] = {&m_levels.bassAtt, &m_levels.midAtt, &m_levels.trebAtt};
     for (int b = 0; b < 3; ++b) {
-        const float mean = static_cast<float>(energy[b] / count);
-        float& avg = m_avgEnergy[b];
-        avg = (avg == 0.0f) ? mean : avg + (mean - avg) * avgRate;
-        *level[b] = std::clamp(mean / std::max(avg, 1e-9f), 0.0f, 4.0f);
-        *att[b] += (*level[b] - *att[b]) * attRate;
+        float rate = imm[b] > m_avg[b] ? 0.2f : 0.5f;
+        rate = adjustRate(rate, fps);
+        m_avg[b] = m_avg[b] * rate + imm[b] * (1.0f - rate);
+        rate = adjustRate(m_frame < 50 ? 0.9f : 0.992f, fps);
+        m_longAvg[b] = m_longAvg[b] * rate + imm[b] * (1.0f - rate);
+        const bool silent = std::fabs(m_longAvg[b]) < 0.001f;
+        *level[b] = silent ? 1.0f : imm[b] / m_longAvg[b];
+        *att[b] = silent ? 1.0f : m_avg[b] / m_longAvg[b];
     }
+    ++m_frame;
 }
 
 } // namespace Milk

@@ -34,10 +34,14 @@ void computeMesh(const FrameVars& vars, const PerVertexFn& perVertex, const Audi
     for (int j = 0; j < MESH_Y; ++j) {
         for (int i = 0; i < MESH_X; ++i) {
             VertexVars vv{};
-            vv.x = static_cast<float>(i) / (MESH_X - 1);
-            vv.y = static_cast<float>(j) / (MESH_Y - 1);
-            const float x = vv.x * 2.0f - 1.0f;
-            const float y = -(vv.y * 2.0f - 1.0f);
+            const float gridX = static_cast<float>(i) / (MESH_X - 1);
+            const float gridY = static_cast<float>(j) / (MESH_Y - 1);
+            const float x = gridX * 2.0f - 1.0f;
+            const float y = -(gridY * 2.0f - 1.0f);
+            // The per-pixel x and y span 0.5 +- half the aspect on each axis, so a wide window's y
+            // covers less than 0..1.
+            vv.x = 0.5f + x * 0.5f * aspectX;
+            vv.y = 0.5f - y * 0.5f * aspectY;
             vv.rad = std::sqrt(x * x * aspectX * aspectX + y * y * aspectY * aspectY);
             vv.ang = std::atan2(y * aspectY, x * aspectX);
             vv.zoom = vars.zoom;

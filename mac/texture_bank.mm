@@ -26,6 +26,116 @@ uint32_t hash32(uint32_t x) {
 
 float smooth(float t) { return t * t * (3.0f - 2.0f * t); }
 
+// MilkDrop's noise textures. Each texel starts as four random numbers in [RANGE/2, RANGE/2 + RANGE)
+// packed into a 32-bit colour without masking, so their high bits spill into the next channel, as
+// they do in MilkDrop. Textures with a zoom above 1 keep that noise only on a lattice and fill in
+// the rest by cubic interpolation, one axis at a time.
+struct NoiseRandom {
+    uint32_t state;
+    // The range of MSVC's rand().
+    uint32_t next() {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        return (state >> 8) & 0x7fff;
+    }
+};
+
+float cubicInterpolate(float y0, float y1, float y2, float y3, float t) {
+    const float t2 = t * t;
+    const float a0 = y3 - y2 - y0 + y1;
+    const float a1 = y0 - y1 - a0;
+    const float a2 = y2 - y0;
+    const float a3 = y1;
+    return a0 * t * t2 + a1 * t2 + a2 * t + a3;
+}
+
+// Cubic interpolation of each byte of a colour, clamped to 0..1 and truncated.
+uint32_t cubicColour(uint32_t y0, uint32_t y1, uint32_t y2, uint32_t y3, float t) {
+    uint32_t out = 0;
+    for (uint32_t shift = 0; shift < 32; shift += 8) {
+        float f = cubicInterpolate(((y0 >> shift) & 0xFF) / 255.0f, ((y1 >> shift) & 0xFF) / 255.0f,
+                                   ((y2 >> shift) & 0xFF) / 255.0f, ((y3 >> shift) & 0xFF) / 255.0f, t);
+        f = std::clamp(f, 0.0f, 1.0f);
+        out |= static_cast<uint32_t>(f * 255.0f) << shift;
+    }
+    return out;
+}
+
+uint32_t noiseTexel(NoiseRandom& rng, int range) {
+    auto channel = [&] { return static_cast<uint32_t>(rng.next() % range + range / 2); };
+    const uint32_t a = channel(), r = channel(), g = channel(), b = channel();
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
+
+// size^dims texels, x fastest.
+std::vector<uint32_t> makeNoise(int dims, int size, int zoom, uint32_t seed) {
+    NoiseRandom rng{seed * 2654435761u + 0x9e3779b9u};
+    if (rng.state == 0) rng.state = 1;
+    const int range = zoom > 1 ? 216 : 256;
+    const int lines = dims == 3 ? size * size : size;
+    std::vector<uint32_t> d(static_cast<size_t>(lines) * size);
+    for (int line = 0; line < lines; ++line) {
+        uint32_t* row = d.data() + static_cast<size_t>(line) * size;
+        for (int x = 0; x < size; ++x) row[x] = noiseTexel(rng, range);
+        for (int x = 0; x < size; ++x) {
+            const int x1 = static_cast<int>(rng.next() % size);
+            const int x2 = static_cast<int>(rng.next() % size);
+            std::swap(row[x1], row[x2]);
+        }
+    }
+    if (zoom <= 1) return d;
+    const size_t slice = static_cast<size_t>(size) * size;
+    auto at = [&](int x, int y, int z) -> uint32_t& { return d[z * slice + static_cast<size_t>(y) * size + x]; };
+    const int depth = dims == 3 ? size : 1;
+    auto wrap = [&](int v) { return ((v % size) + size) % size; };
+    for (int z = 0; z < depth; z += zoom) {
+        for (int y = 0; y < size; y += zoom) {
+            for (int x = 0; x < size; ++x) {
+                if (x % zoom == 0) continue;
+                const int base = (x / zoom) * zoom + size;
+                at(x, y, z) = cubicColour(at(wrap(base - zoom), y, z), at(wrap(base), y, z), at(wrap(base + zoom), y, z),
+                                          at(wrap(base + zoom * 2), y, z), (x % zoom) / static_cast<float>(zoom));
+            }
+        }
+    }
+    for (int z = 0; z < depth; z += zoom) {
+        for (int x = 0; x < size; ++x) {
+            for (int y = 0; y < size; ++y) {
+                if (y % zoom == 0) continue;
+                const int base = (y / zoom) * zoom + size;
+                at(x, y, z) = cubicColour(at(x, wrap(base - zoom), z), at(x, wrap(base), z), at(x, wrap(base + zoom), z),
+                                          at(x, wrap(base + zoom * 2), z), (y % zoom) / static_cast<float>(zoom));
+            }
+        }
+    }
+    if (dims == 3) {
+        for (int x = 0; x < size; ++x) {
+            for (int y = 0; y < size; ++y) {
+                for (int z = 0; z < size; ++z) {
+                    if (z % zoom == 0) continue;
+                    const int base = (z / zoom) * zoom + size;
+                    at(x, y, z) = cubicColour(at(x, y, wrap(base - zoom)), at(x, y, wrap(base)), at(x, y, wrap(base + zoom)),
+                                              at(x, y, wrap(base + zoom * 2)), (z % zoom) / static_cast<float>(zoom));
+                }
+            }
+        }
+    }
+    return d;
+}
+
+// A8R8G8B8 words to RGBA bytes.
+std::vector<uint8_t> toRgba(const std::vector<uint32_t>& d) {
+    std::vector<uint8_t> out(d.size() * 4);
+    for (size_t i = 0; i < d.size(); ++i) {
+        out[i * 4 + 0] = static_cast<uint8_t>(d[i] >> 16);
+        out[i * 4 + 1] = static_cast<uint8_t>(d[i] >> 8);
+        out[i * 4 + 2] = static_cast<uint8_t>(d[i]);
+        out[i * 4 + 3] = static_cast<uint8_t>(d[i] >> 24);
+    }
+    return out;
+}
+
 } // namespace
 
 TextureBank::TextureBank(id<MTLDevice> device, const std::string& textureDir) : m_device(device), m_dir(textureDir) {
@@ -58,6 +168,7 @@ TextureBank::Lookup TextureBank::parse(const std::string& samplerName) {
     if (out.name.rfind("sampler_", 0) == 0) out.name = out.name.substr(8);
     static const struct { const char* prefix; bool filtered; bool wrap; } PREFIXES[] = {
         {"fw_", true, true}, {"fc_", true, false}, {"pw_", false, true}, {"pc_", false, false},
+        {"wf_", true, true}, {"cf_", true, false}, {"wp_", false, true}, {"cp_", false, false},
     };
     for (const auto& p : PREFIXES) {
         if (out.name.rfind(p.prefix, 0) == 0) {
@@ -114,64 +225,26 @@ id<MTLTexture> TextureBank::texture(const std::string& name, uint32_t presetSeed
 // Random RGBA values on a lattice every `zoom` texels, smoothly interpolated. The lattice wraps,
 // so the texture tiles.
 id<MTLTexture> TextureBank::noise2D(int size, int zoom, uint32_t seed) {
-    const int cells = std::max(1, size / zoom);
-    std::vector<uint8_t> pixels(static_cast<size_t>(size) * size * 4);
-    auto lattice = [&](int x, int y, int c) {
-        x = ((x % cells) + cells) % cells;
-        y = ((y % cells) + cells) % cells;
-        return (hash32(seed * 0x9e3779b9u + static_cast<uint32_t>((y * cells + x) * 4 + c)) & 0xffff) / 65535.0f;
-    };
-    for (int y = 0; y < size; ++y) {
-        for (int x = 0; x < size; ++x) {
-            const int cx = x / zoom, cy = y / zoom;
-            const float tx = smooth(static_cast<float>(x % zoom) / zoom);
-            const float ty = smooth(static_cast<float>(y % zoom) / zoom);
-            for (int c = 0; c < 4; ++c) {
-                const float a = lattice(cx, cy, c) + (lattice(cx + 1, cy, c) - lattice(cx, cy, c)) * tx;
-                const float b = lattice(cx, cy + 1, c) + (lattice(cx + 1, cy + 1, c) - lattice(cx, cy + 1, c)) * tx;
-                pixels[(static_cast<size_t>(y) * size + x) * 4 + c] = static_cast<uint8_t>(std::lround((a + (b - a) * ty) * 255.0f));
-            }
-        }
-    }
+    const std::vector<uint8_t> pixels = toRgba(makeNoise(2, size, zoom, seed));
     MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                                     width:size
                                                                                    height:size
-                                                                                mipmapped:NO];
+                                                                                mipmapped:YES];
     desc.usage = MTLTextureUsageShaderRead;
     id<MTLTexture> tex = [m_device newTextureWithDescriptor:desc];
     [tex replaceRegion:MTLRegionMake2D(0, 0, size, size) mipmapLevel:0 withBytes:pixels.data() bytesPerRow:size * 4];
+    // MilkDrop's 2D noise textures have a full mip chain.
+    id<MTLCommandBuffer> commands = [[m_device newCommandQueue] commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+    [blit generateMipmapsForTexture:tex];
+    [blit endEncoding];
+    [commands commit];
+    [commands waitUntilCompleted];
     return tex;
 }
 
 id<MTLTexture> TextureBank::noise3D(int size, int zoom, uint32_t seed) {
-    const int cells = std::max(1, size / zoom);
-    std::vector<uint8_t> pixels(static_cast<size_t>(size) * size * size * 4);
-    auto lattice = [&](int x, int y, int z, int c) {
-        x = ((x % cells) + cells) % cells;
-        y = ((y % cells) + cells) % cells;
-        z = ((z % cells) + cells) % cells;
-        return (hash32(seed * 0x9e3779b9u + static_cast<uint32_t>(((z * cells + y) * cells + x) * 4 + c)) & 0xffff) / 65535.0f;
-    };
-    for (int z = 0; z < size; ++z) {
-        for (int y = 0; y < size; ++y) {
-            for (int x = 0; x < size; ++x) {
-                const int cx = x / zoom, cy = y / zoom, cz = z / zoom;
-                const float tx = smooth(static_cast<float>(x % zoom) / zoom);
-                const float ty = smooth(static_cast<float>(y % zoom) / zoom);
-                const float tz = smooth(static_cast<float>(z % zoom) / zoom);
-                for (int c = 0; c < 4; ++c) {
-                    float v[2];
-                    for (int k = 0; k < 2; ++k) {
-                        const float a = lattice(cx, cy, cz + k, c) + (lattice(cx + 1, cy, cz + k, c) - lattice(cx, cy, cz + k, c)) * tx;
-                        const float b = lattice(cx, cy + 1, cz + k, c) + (lattice(cx + 1, cy + 1, cz + k, c) - lattice(cx, cy + 1, cz + k, c)) * tx;
-                        v[k] = a + (b - a) * ty;
-                    }
-                    const float value = v[0] + (v[1] - v[0]) * tz;
-                    pixels[((static_cast<size_t>(z) * size + y) * size + x) * 4 + c] = static_cast<uint8_t>(std::lround(value * 255.0f));
-                }
-            }
-        }
-    }
+    const std::vector<uint8_t> pixels = toRgba(makeNoise(3, size, zoom, seed));
     MTLTextureDescriptor* desc = [MTLTextureDescriptor new];
     desc.textureType = MTLTextureType3D;
     desc.pixelFormat = MTLPixelFormatRGBA8Unorm;
