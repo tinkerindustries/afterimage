@@ -19,7 +19,7 @@ int wrapIndex(int i, int n) {
 // Follows the warp mesh in MilkDrop 1.04's source: zoom about the screen centre, stretch about
 // (cx, cy), the four-term animated warp, rotation about (cx, cy), then translation. The work is
 // done in a space with equal units on both axes so rotation stays circular.
-void computeMesh(const FrameVars& vars, PerVertexFn perVertex, const AudioLevels& audio, float time,
+void computeMesh(const FrameVars& vars, const PerVertexFn& perVertex, const AudioLevels& audio, float time,
                  int width, int height, std::vector<MeshUv>& out) {
     out.resize(MESH_X * MESH_Y);
     const float aspectX = (height > width) ? static_cast<float>(width) / height : 1.0f;
@@ -50,10 +50,10 @@ void computeMesh(const FrameVars& vars, PerVertexFn perVertex, const AudioLevels
             vv.dy = vars.dy;
             vv.sx = vars.sx;
             vv.sy = vars.sy;
-            if (perVertex != nullptr) perVertex(vv, audio, time);
+            if (perVertex) perVertex(vv, audio, time);
 
             const float zoom2 = std::pow(std::max(vv.zoom, 0.01f), std::pow(std::max(vv.zoomExp, 0.01f), vv.rad * 2.0f - 1.0f));
-            const float zoomInv = 1.0f / zoom2;
+            const float zoomInv = 1.0f / std::max(zoom2, 1e-6f);
             float u = x * aspectX * 0.5f * zoomInv + 0.5f;
             float v = -y * aspectY * 0.5f * zoomInv + 0.5f;
 
@@ -96,7 +96,7 @@ void FeedbackBuffer::clear() {
     std::fill(m_back.begin(), m_back.end(), 0.0f);
 }
 
-void FeedbackBuffer::warp(const FrameVars& vars, PerVertexFn perVertex, const AudioLevels& audio, float time) {
+void FeedbackBuffer::warp(const FrameVars& vars, const PerVertexFn& perVertex, const AudioLevels& audio, float time) {
     computeMesh(vars, perVertex, audio, time, m_width, m_height, m_mesh);
     const float decay = vars.decay;
     const bool wrap = vars.wrap;
@@ -193,7 +193,10 @@ void FeedbackBuffer::splatLine(float x0, float y0, float x1, float y1, float r, 
     }
 }
 
-void FeedbackBuffer::drawWave(const FrameVars& vars, const float* samples, int count) {
+void wavePoints(const FrameVars& vars, const float* samples, int count, int width, int height,
+                std::vector<float>& xs, std::vector<float>& ys) {
+    xs.clear();
+    ys.clear();
     if (count < 4) return;
     std::vector<float> smooth(count);
     float acc = samples[0];
@@ -202,16 +205,11 @@ void FeedbackBuffer::drawWave(const FrameVars& vars, const float* samples, int c
         smooth[i] = acc;
     }
 
-    const float r = vars.waveR * vars.waveA;
-    const float g = vars.waveG * vars.waveA;
-    const float b = vars.waveB * vars.waveA;
-    const float cx = vars.waveX * m_width;
-    const float cy = vars.waveY * m_height;
-    const float minDim = static_cast<float>(std::min(m_width, m_height));
+    const float cx = vars.waveX * width;
+    const float cy = vars.waveY * height;
+    const float minDim = static_cast<float>(std::min(width, height));
     const float scale = vars.waveScale;
 
-    std::vector<float> xs;
-    std::vector<float> ys;
     switch (vars.waveMode) {
     case WAVE_CIRCLE: {
         const int points = 256;
@@ -244,13 +242,21 @@ void FeedbackBuffer::drawWave(const FrameVars& vars, const float* samples, int c
         const int points = 320;
         for (int k = 0; k < points; ++k) {
             const int idx = k * (count - 1) / (points - 1);
-            xs.push_back(static_cast<float>(k) / (points - 1) * m_width);
+            xs.push_back(static_cast<float>(k) / (points - 1) * width);
             ys.push_back(cy + smooth[idx] * scale * minDim * 0.25f);
         }
         break;
     }
     }
+}
 
+void FeedbackBuffer::drawWave(const FrameVars& vars, const float* samples, int count) {
+    std::vector<float> xs;
+    std::vector<float> ys;
+    wavePoints(vars, samples, count, m_width, m_height, xs, ys);
+    const float r = vars.waveR * vars.waveA;
+    const float g = vars.waveG * vars.waveA;
+    const float b = vars.waveB * vars.waveA;
     for (size_t k = 1; k < xs.size(); ++k) {
         splatLine(xs[k - 1], ys[k - 1], xs[k], ys[k], r, g, b, vars.waveThick);
     }

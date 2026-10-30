@@ -2,6 +2,7 @@
 
 #include "audio_synth.h"
 #include "feedback.h"
+#include "preset.h"
 
 #include <algorithm>
 #include <cmath>
@@ -21,17 +22,6 @@ constexpr float STEP_SECONDS = 1.0f / 60.0f;
 constexpr int SAMPLES_PER_TICK = SAMPLE_RATE / 60;
 constexpr int FLOW_EXAGGERATION = 6;
 
-enum Motion : int {
-    MOTION_STILL = 0,
-    MOTION_PULSE = 1,
-    MOTION_SWAY = 2,
-    MOTION_STORM = 3,
-    MOTION_RIPPLE = 4,
-};
-
-const std::vector<std::string> MOTION_NAMES = {"still", "pulse", "sway", "storm", "ripple"};
-const std::vector<std::string> WAVE_MODE_NAMES = {"circle", "xy", "line"};
-
 enum Brightness : int {
     BRIGHTNESS_NORMAL = 0,
     BRIGHTNESS_DARK = 1,
@@ -39,35 +29,6 @@ enum Brightness : int {
 };
 
 const char* BRIGHTNESS_NAMES[] = {"normal", "dark", "saturated"};
-
-// The knobs, named after the MilkDrop preset variables they set. Plain data so it saves as bytes.
-struct Params {
-    float zoom = 1.02f;
-    float zoomExp = 1.0f;
-    float rot = 0.01f;
-    float warp = 1.0f;
-    float warpSpeed = 1.0f;
-    float warpScale = 1.0f;
-    float cx = 0.5f;
-    float cy = 0.5f;
-    float dx = 0.0f;
-    float dy = 0.0f;
-    float sx = 1.0f;
-    float sy = 1.0f;
-    float decay = 0.975f;
-    int waveMode = WAVE_CIRCLE;
-    float waveScale = 1.0f;
-    float waveX = 0.5f;
-    float waveY = 0.5f;
-    float waveAlpha = 0.8f;
-    uint8_t waveColour[3] = {255, 170, 64};
-    bool waveThick = true;
-    bool colourCycle = true;
-    bool wrap = false;
-    int motion = MOTION_SWAY;
-    float bpm = 124.0f;
-    float gammaAdj = 1.6f;
-};
 
 struct World {
     Params params;
@@ -80,86 +41,6 @@ struct World {
     float litFraction = 0.0f;
     int brightness = BRIGHTNESS_DARK;
 };
-
-// Per-frame equations. Each starts from the knob values, the way a MilkDrop preset's per-frame
-// code starts from the preset's base values.
-void motionPulse(FrameVars& f, const AudioLevels& a, float) {
-    f.zoom += 0.06f * (a.bassAtt - 1.0f);
-    f.rot += 0.01f * (a.midAtt - 1.0f);
-    f.waveA *= std::clamp(0.4f + 0.4f * a.bass, 0.2f, 1.5f);
-}
-
-void motionSway(FrameVars& f, const AudioLevels& a, float t) {
-    f.cx += 0.12f * std::sin(t * 0.37f);
-    f.cy += 0.10f * std::cos(t * 0.29f);
-    f.rot += 0.02f * std::sin(t * 0.61f);
-    f.dx += 0.004f * std::sin(t * 0.23f);
-    f.zoom += 0.02f * (a.bassAtt - 1.0f);
-}
-
-void motionStorm(FrameVars& f, const AudioLevels& a, float t) {
-    f.warp += std::clamp(2.0f * (a.trebAtt - 1.0f), -1.0f, 3.0f);
-    f.rot += 0.04f * std::sin(t * 0.13f) * a.bassAtt;
-    f.zoom += 0.03f * std::sin(t * 0.71f);
-}
-
-void motionRippleVertex(VertexVars& v, const AudioLevels& a, float t) {
-    v.zoom *= 1.0f + 0.015f * std::sin(v.rad * 18.0f - t * 3.0f) * a.bassAtt;
-}
-
-void applyMotion(int motion, FrameVars& f, const AudioLevels& a, float t) {
-    switch (motion) {
-    case MOTION_PULSE: motionPulse(f, a, t); break;
-    case MOTION_SWAY: motionSway(f, a, t); break;
-    case MOTION_STORM: motionStorm(f, a, t); break;
-    default: break;
-    }
-}
-
-PerVertexFn perVertexFor(int motion) {
-    return motion == MOTION_RIPPLE ? motionRippleVertex : nullptr;
-}
-
-FrameVars frameFromParams(const Params& p, float t) {
-    FrameVars f;
-    f.zoom = p.zoom;
-    f.zoomExp = p.zoomExp;
-    f.rot = p.rot;
-    f.warp = p.warp;
-    f.warpSpeed = p.warpSpeed;
-    f.warpScale = p.warpScale;
-    f.cx = p.cx;
-    f.cy = p.cy;
-    f.dx = p.dx;
-    f.dy = p.dy;
-    f.sx = p.sx;
-    f.sy = p.sy;
-    f.decay = p.decay;
-    f.waveMode = p.waveMode;
-    f.waveScale = p.waveScale;
-    f.waveX = p.waveX;
-    f.waveY = p.waveY;
-    f.waveA = p.waveAlpha;
-    f.waveThick = p.waveThick;
-    f.wrap = p.wrap;
-    f.waveR = p.waveColour[0] / 255.0f;
-    f.waveG = p.waveColour[1] / 255.0f;
-    f.waveB = p.waveColour[2] / 255.0f;
-    if (p.colourCycle) {
-        f.waveR *= 0.6f + 0.4f * std::sin(t * 1.13f);
-        f.waveG *= 0.6f + 0.4f * std::sin(t * 1.23f + 2.0f);
-        f.waveB *= 0.6f + 0.4f * std::sin(t * 1.37f + 4.0f);
-    }
-    return f;
-}
-
-void clampFrame(FrameVars& f) {
-    f.zoom = std::max(f.zoom, 0.05f);
-    f.sx = std::abs(f.sx) < 0.01f ? 0.01f : f.sx;
-    f.sy = std::abs(f.sy) < 0.01f ? 0.01f : f.sy;
-    f.decay = std::clamp(f.decay, 0.0f, 1.0f);
-    f.waveA = std::clamp(f.waveA, 0.0f, 1.0f);
-}
 
 void measure(World& w) {
     const std::vector<float>& px = w.buffer.pixels();

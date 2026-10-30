@@ -2,6 +2,7 @@
 
 #include "audio_synth.h"
 
+#include <functional>
 #include <vector>
 
 namespace Milk {
@@ -48,15 +49,19 @@ struct VertexVars {
     float zoom, zoomExp, rot, warp, cx, cy, dx, dy, sx, sy;
 };
 
-using PerVertexFn = void (*)(VertexVars&, const AudioLevels&, float time);
+using PerVertexFn = std::function<void(VertexVars&, const AudioLevels&, float time)>;
 
 struct MeshUv {
     float u, v;
 };
 
 // Where each mesh vertex samples the previous frame, in 0..1 texture space.
-void computeMesh(const FrameVars& vars, PerVertexFn perVertex, const AudioLevels& audio, float time,
+void computeMesh(const FrameVars& vars, const PerVertexFn& perVertex, const AudioLevels& audio, float time,
                  int width, int height, std::vector<MeshUv>& out);
+
+// The waveform polyline in pixels for a width x height image. Empty when count is under 4.
+void wavePoints(const FrameVars& vars, const float* samples, int count, int width, int height,
+                std::vector<float>& xs, std::vector<float>& ys);
 
 class FeedbackBuffer {
 public:
@@ -69,7 +74,7 @@ public:
     std::vector<float>& pixels() { return m_front; }
 
     void clear();
-    void warp(const FrameVars& vars, PerVertexFn perVertex, const AudioLevels& audio, float time);
+    void warp(const FrameVars& vars, const PerVertexFn& perVertex, const AudioLevels& audio, float time);
     void drawWave(const FrameVars& vars, const float* samples, int count);
 
 private:
