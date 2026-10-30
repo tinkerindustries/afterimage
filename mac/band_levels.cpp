@@ -14,7 +14,7 @@ float adjustRate(float rate, float fps) { return std::pow(rate, 30.0f / fps); }
 
 } // namespace
 
-void BandLevels::update(const float* left, int count, float frameScale) {
+void BandLevels::update(const float* left, int count, float frameScale, const float* right) {
     if (count <= 0) return;
     const int n = static_cast<int>(m_recent.size());
     const int keep = std::max(0, n - count);
@@ -26,12 +26,27 @@ void BandLevels::update(const float* left, int count, float frameScale) {
     for (int i = 0; i < MILK_FFT_INPUT; ++i) scaled[i] = m_recent[i] * 128.0f;
     std::array<float, MILK_SPECTRUM_SAMPLES> spectrum;
     computeSpectrum(scaled.data(), spectrum);
+    if (m_milkwave) {
+        const float* source = right != nullptr ? right : left;
+        std::copy(m_recentRight.begin() + (n - keep), m_recentRight.end(), m_recentRight.begin());
+        for (int i = 0; i < fresh; ++i) m_recentRight[keep + i] = source[count - fresh + i];
+        std::array<float, MILK_FFT_INPUT> scaledRight;
+        for (int i = 0; i < MILK_FFT_INPUT; ++i) scaledRight[i] = m_recentRight[i] * 128.0f;
+        std::array<float, MILK_SPECTRUM_SAMPLES> spectrumRight;
+        computeSpectrum(scaledRight.data(), spectrumRight);
+        for (int i = 0; i < MILK_SPECTRUM_SAMPLES; ++i) spectrum[i] += spectrumRight[i];
+    }
 
     const float fps = 60.0f / std::max(frameScale, 0.01f);
     float* imm = m_imm;
     for (int b = 0; b < 3; ++b) {
-        const int start = MILK_SPECTRUM_SAMPLES * b / 6;
-        const int end = MILK_SPECTRUM_SAMPLES * (b + 1) / 6;
+        int start = MILK_SPECTRUM_SAMPLES * b / 6;
+        int end = MILK_SPECTRUM_SAMPLES * (b + 1) / 6;
+        if (m_milkwave) {
+            const int edges[4] = {0, 250, 4000, 20000};
+            start = std::clamp(edges[b] * MILK_SPECTRUM_SAMPLES / 24000, 0, MILK_SPECTRUM_SAMPLES - 1);
+            end = std::clamp(edges[b + 1] * MILK_SPECTRUM_SAMPLES / 24000, 0, MILK_SPECTRUM_SAMPLES - 1) + 1;
+        }
         imm[b] = 0.0f;
         for (int j = start; j < end; ++j) imm[b] += spectrum[j];
     }
@@ -44,8 +59,9 @@ void BandLevels::update(const float* left, int count, float frameScale) {
         rate = adjustRate(m_frame < 50 ? 0.9f : 0.992f, fps);
         m_longAvg[b] = m_longAvg[b] * rate + imm[b] * (1.0f - rate);
         const bool silent = std::fabs(m_longAvg[b]) < 0.001f;
-        *level[b] = silent ? 1.0f : imm[b] / m_longAvg[b];
-        *att[b] = silent ? 1.0f : m_avg[b] / m_longAvg[b];
+        const float quiet = m_milkwave ? 0.0f : 1.0f;
+        *level[b] = silent ? quiet : imm[b] / m_longAvg[b];
+        *att[b] = silent ? quiet : m_avg[b] / m_longAvg[b];
     }
     ++m_frame;
 }

@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -34,7 +35,9 @@ constexpr int STEREO_HISTORY = 1024;
 constexpr int SCRATCH_SAMPLES = 1 << 14;
 // The CPU effect renders at this height. Wave widths scale from it.
 constexpr float REFERENCE_HEIGHT = 540.0f;
-constexpr MTLPixelFormat FEEDBACK_FORMAT = MTLPixelFormatRGBA16Float;
+// MilkDrop keeps its feedback and blur images at 8 bits per channel, and some presets depend on
+// the rounding: increments below 1/255 vanish.
+constexpr MTLPixelFormat FEEDBACK_FORMAT = MTLPixelFormatRGBA8Unorm;
 // MilkDrop's equations and shaders assume one step per frame at about this rate.
 constexpr NSInteger PRESET_FPS = 60;
 constexpr NSInteger MOTION_FPS = 120;
@@ -447,6 +450,7 @@ float squishToCenter(float x, float exponent) {
     m_tapError.clear();
     if (m_tap.start(m_tapError)) {
         m_bands = std::make_unique<BandLevels>();
+    m_bands->useMilkwaveBands(std::getenv("MILK_BANDS") != nullptr);
         m_source = SOURCE_SYSTEM;
     } else {
         NSLog(@"System audio unavailable: %s", m_tapError.c_str());
@@ -539,12 +543,13 @@ float squishToCenter(float x, float exponent) {
     m_fileL.assign(left, left + count);
     m_fileR.assign(right, right + count);
     m_bands = std::make_unique<BandLevels>();
+    m_bands->useMilkwaveBands(std::getenv("MILK_BANDS") != nullptr);
     // Run the band averages over up to two seconds before the start, so the first frames are not
     // measured against an empty average.
     const size_t lead = std::min<size_t>(start, 2 * SAMPLE_RATE);
     std::vector<float> mono(SAMPLE_RATE / 60);
     for (size_t at = start - lead; at + mono.size() <= start; at += mono.size()) {
-        m_bands->update(m_fileL.data() + at, static_cast<int>(mono.size()), 1.0f);
+        m_bands->update(m_fileL.data() + at, static_cast<int>(mono.size()), 1.0f, m_fileR.data() + at);
     }
     m_filePos = start;
     m_source = SOURCE_FILE;
@@ -646,7 +651,7 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     if (m_source == SOURCE_SYSTEM) {
         count = m_tap.read(m_scratch.data(), m_scratchR.data(), SCRATCH_SAMPLES);
         for (int i = 0; i < count; ++i) m_mono[i] = 0.5f * (m_scratch[i] + m_scratchR[i]);
-        m_bands->update(m_scratch.data(), count, frameScale);
+        m_bands->update(m_scratch.data(), count, frameScale, m_scratchR.data());
         levels = m_bands->levels();
     } else if (m_source == SOURCE_FILE) {
         count = std::min(SCRATCH_SAMPLES, static_cast<int>(std::lround(dt * SAMPLE_RATE)));
@@ -657,7 +662,7 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
             m_mono[i] = 0.5f * (m_scratch[i] + m_scratchR[i]);
         }
         m_filePos += count;
-        m_bands->update(m_scratch.data(), count, frameScale);
+        m_bands->update(m_scratch.data(), count, frameScale, m_scratchR.data());
         levels = m_bands->levels();
     } else {
         count = std::min(SCRATCH_SAMPLES, static_cast<int>(std::lround(dt * SAMPLE_RATE)));
@@ -669,6 +674,7 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
             // synth through it first, as a MilkDrop session would already have its averages.
             if (!m_bands) {
                 m_bands = std::make_unique<BandLevels>();
+    m_bands->useMilkwaveBands(std::getenv("MILK_BANDS") != nullptr);
                 SynthState lead = m_synth;
                 std::vector<float> block(SAMPLE_RATE / 60);
                 for (int i = 0; i < 120; ++i) {

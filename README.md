@@ -41,7 +41,7 @@ The first configure fetches SDL3, SDL3_image, SDL3_ttf, glslang and SPIRV-Cross 
 
 The CPU still computes the 64x48-cell warp mesh with `computeMesh`. The GPU resamples the previous frame through it, adds the waveform, and scales the result by `gamma_adj` for the screen. The built-in motions' equations are written for 60 Hz, so the app scales each frame's displacement and decay by the frame's length.
 
-The feedback image is the window's size in points, not Retina pixels, which is what MilkDrop would have rendered in a window of the same physical size on a non-Retina screen. Presets measure offsets, blur widths and line widths in pixels, so this keeps them at the scale their authors saw. Each frame ends with the image clamped to 0..1 (NaN becomes 0), as MilkDrop's 8-bit image would be.
+The feedback image is the window's size in points, not Retina pixels, which is what MilkDrop would have rendered in a window of the same physical size on a non-Retina screen. Presets measure offsets, blur widths and line widths in pixels, so this keeps them at the scale their authors saw. The feedback and blur images are 8 bits per channel, as MilkDrop's are, so increments below 1/255 vanish and some presets depend on that. Each frame ends with the image clamped to 0..1 (NaN becomes 0).
 
 Launch it with `open build/Milk.app`. Keys:
 
@@ -84,7 +84,8 @@ These tools work on presets:
 - `build/milk_render [--audio <file> [--audio-start <seconds>]] [--black-start] [--frames <dir> --root <dir>] <sheet.png> <seconds> <size> <preset.milk>...` renders each preset offscreen on the synthesiser, or on the same stretch of an audio file when `--audio` is given (any format Core Audio reads; `tools/make_sweep.py` writes a 30 s sine sweep for it). `--black-start` begins from a black image instead of noise, and `--frames` also writes each frame as a PNG named after the preset's path under `--root`. It writes a contact sheet with MilkDrop's preview (the `.jpg` beside the `.milk`, where there is one) on the left and this renderer's frame on the right.
 
 - `python3 tools/compare_frames.py <reference dir> <our dir> <out dir>` ranks how far this renderer's frames are from MilkDrop captures of the same presets and writes contact sheets of the biggest differences. `docs/capture-shortlist.txt` lists the presets chosen for capture, and `tools/make_sweep.py` writes the test audio.
-- `ctest --test-dir build` runs `milk_expr_test` (expression semantics) and `milk_shader_test` (the HLSL rewrites).
+- - Against MilkDrop captures, set `MILK_BANDS=1` when rendering to use Milkwave's audio analysis (both channels, bands in Hz), which is what produced the captures on the `milkdrop-captures` branch. Compare a capture folder with a second run of the same presets to find how repeatable MilkDrop is, and read our scores relative to that.
+`ctest --test-dir build` runs `milk_expr_test` (expression semantics) and `milk_shader_test` (the HLSL rewrites).
 
 Add `-v` to either check to list each failing preset. `milk_shader_check <file.milk> --dump` prints one preset's generated Metal, its uniform offsets and its texture bindings, and `--hlsl` prints the HLSL that goes to glslang.
 

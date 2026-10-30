@@ -257,6 +257,29 @@ A single flat tone with almost no detail.
 | flexi + geiss - bipolar vs reaction diffusion [antirotating reflection]_Phat_SeizureBox | 0.782 | 0.001 | 0.764 | yes |
 | flexi - grind my glitch up [342] | 0.825 | 0.009 | 1.000 | yes |
 
+## Comparison with MilkDrop captures
+
+The `milkdrop-captures` branch holds 512x512 captures from Milkwave 4.1 (a DirectX 9 port of MilkDrop 2) of 170 presets, taken twice. `tools/compare_frames.py` scores how far two images are from each other, 0 for identical. Presets use random numbers, so MilkDrop is not identical to itself: its two runs score a median of 0.24 against each other. Rendered with `MILK_BANDS=1`, to use Milkwave's audio analysis, our frames score a median of 0.25 against the first run. 126 of 170 are within 0.05 of MilkDrop's own repeatability, and 89 are closer to MilkDrop than it is to itself.
+
+These presets score more than 0.2 above their own repeat-run score, so MilkDrop produces much the same frame each time and ours differs. Each is worth reading against its captures.
+
+| Preset | MilkDrop vs itself | Ours vs MilkDrop |
+|---|---|---|
+| Jc - Snowflake | 0.09 | 0.59 |
+| Flexi - against all ods | 0.00 | 0.49 |
+| $$$ Royal - Mashup (96) | 0.23 | 0.61 |
+| Fumbling_Foo + En D & Martin - Mandelverse 31 | 0.27 | 0.65 |
+| high_frequency__rationalizing insanity using only mainstream religion nz+ barf bowl | 0.33 | 0.71 |
+| fiShbRaiN - betelguese (hyperdrive remix) - as blue as our new second sun | 0.16 | 0.49 |
+| high_frequency__Flexi - self similarity - i love flexi a lot (apple IIe crt whores) nz | 0.16 | 0.49 |
+| flexi + geiss - bipolar vs reaction diffusion [antirotating reflection]_Phat_SeizureBox | 0.27 | 0.59 |
+| Serge + 158 001 | 0.12 | 0.37 |
+| Serge + 158 000 | 0.14 | 0.38 |
+| martin - city lights | 0.13 | 0.37 |
+| $$$ Royal - Mashup (377) | 0.08 | 0.30 |
+| $$$ Royal - Mashup (158) | 0.23 | 0.44 |
+| Goody - Aurora Totalis | 0.25 | 0.45 |
+
 ## Mismatches seen on contact sheets
 
 These render with normal brightness but look clearly different from their MilkDrop previews.
