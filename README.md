@@ -102,3 +102,7 @@ Add `-v` to either check to list each failing preset. `milk_shader_check <file.m
 - [docs/how-feedback-visualisers-work.md](docs/how-feedback-visualisers-work.md): how Geiss and MilkDrop produce their effects.
 - [docs/online-resources.md](docs/online-resources.md): where to watch them and find preset collections.
 - [docs/remaining-presets.md](docs/remaining-presets.md): presets that still fail or render badly, from one scan, with the commands that regenerate it.
+
+## Licence
+
+The code and documents are MIT licensed: see [LICENSE](LICENSE). [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) credits the projects this follows and the libraries it builds on. The licence does not cover MilkDrop presets or textures.
