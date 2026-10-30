@@ -202,6 +202,7 @@ struct OldPreset {
 
 NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
 NSString* const MilkAudioDeviceKey = @"AudioDeviceUID";
+NSString* const MilkPresetsFolderKey = @"PresetsFolder";
 
 @implementation MilkRenderer {
     id<MTLDevice> m_device;
@@ -241,6 +242,7 @@ NSString* const MilkAudioDeviceKey = @"AudioDeviceUID";
     size_t m_filePos;
     AudioSource m_source;
     std::string m_tapError;
+    std::string m_presetsDir;
     std::vector<std::string> m_presetPaths;
     NSArray<NSString*>* m_presetNames;
     int m_presetIndex;
@@ -298,6 +300,23 @@ NSString* const MilkAudioDeviceKey = @"AudioDeviceUID";
     std::vector<float> m_waveYs;
     double m_lastFrame;
     float m_time;
+}
+
++ (NSString*)defaultPresetsDirectory {
+    NSURL* support = [NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
+    return [[support.path stringByAppendingPathComponent:@"Afterimage"] stringByAppendingPathComponent:@"presets"];
+}
+
++ (NSString*)presetsDirectory {
+    NSFileManager* files = NSFileManager.defaultManager;
+    BOOL isDirectory = NO;
+    NSString* chosen = [NSUserDefaults.standardUserDefaults stringForKey:MilkPresetsFolderKey];
+    if (chosen.length && [files fileExistsAtPath:chosen isDirectory:&isDirectory] && isDirectory) return chosen;
+    NSString* fallback = [self defaultPresetsDirectory];
+    if ([files contentsOfDirectoryAtPath:fallback error:nil].count > 0) return fallback;
+    NSString* checkout = @(MILK_PRESET_DIR);
+    if ([files fileExistsAtPath:checkout isDirectory:&isDirectory] && isDirectory) return checkout;
+    return fallback;
 }
 
 - (nullable instancetype)initWithView:(MTKView*)view error:(NSString* _Nullable* _Nullable)error {
@@ -368,7 +387,8 @@ NSString* const MilkAudioDeviceKey = @"AudioDeviceUID";
     m_presetStartTime = 0.0f;
     m_timeOrigin = 0.0f;
     m_random.seed(1);
-    m_bank = std::make_unique<TextureBank>(m_device, std::string(MILK_PRESET_DIR) + "/textures");
+    m_presetsDir = [MilkRenderer presetsDirectory].UTF8String;
+    m_bank = std::make_unique<TextureBank>(m_device, m_presetsDir + "/textures");
     return self;
 }
 
@@ -554,12 +574,12 @@ NSString* const MilkAudioDeviceKey = @"AudioDeviceUID";
 
 - (void)findPresets {
     std::error_code ec;
-    for (const auto& entry : std::filesystem::recursive_directory_iterator(MILK_PRESET_DIR, ec)) {
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(m_presetsDir, ec)) {
         if (entry.is_regular_file() && entry.path().extension() == ".milk") m_presetPaths.push_back(entry.path().string());
     }
     std::sort(m_presetPaths.begin(), m_presetPaths.end());
     NSMutableArray<NSString*>* names = [NSMutableArray arrayWithCapacity:m_presetPaths.size()];
-    const std::string root = std::string(MILK_PRESET_DIR) + "/";
+    const std::string root = m_presetsDir + "/";
     for (const std::string& path : m_presetPaths) {
         std::string name = path.rfind(root, 0) == 0 ? path.substr(root.size()) : path;
         name = name.substr(0, name.size() - std::string(".milk").size());

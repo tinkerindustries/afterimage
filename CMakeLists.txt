@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
+set(CMAKE_OSX_DEPLOYMENT_TARGET 14.2)
 project(milk_experimental_effects CXX C)
 if(APPLE)
   enable_language(OBJCXX)

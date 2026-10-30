@@ -370,6 +370,7 @@ constexpr CGFloat THUMB_SIZE = 152;
     const unsigned long total = m_renderer.presetNames.count;
     NSString* count = text.length == 0 ? [NSString stringWithFormat:@"%lu presets", total]
                                        : [NSString stringWithFormat:@"%lu of %lu presets", (unsigned long)m_visible.count, total];
+    if (total == 0) count = @"No presets found. Add .milk files to the presets folder in Settings.";
     if (m_thumbnails && m_thumbnails.readyCount < m_thumbnails.totalCount) {
         count = [count stringByAppendingFormat:@" · rendering thumbnails, %ld of %ld done", (long)m_thumbnails.readyCount,
                                                (long)m_thumbnails.totalCount];

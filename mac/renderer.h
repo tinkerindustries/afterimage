@@ -11,6 +11,11 @@ extern NSString* const MilkPresetDidChangeNotification;
 // device is used when it is missing, empty or names a device that is not there.
 extern NSString* const MilkAudioDeviceKey;
 
+// The user-defaults key holding the presets folder the user chose. Without it the app uses
+// ~/Library/Application Support/Afterimage/presets, or the presets folder of the source checkout it
+// was built from when that is the one with presets in it.
+extern NSString* const MilkPresetsFolderKey;
+
 @interface MilkRenderer : NSObject <MTKViewDelegate>
 
 // For the window: reads shaders.metal from the app bundle, finds the presets and listens to
@@ -38,6 +43,12 @@ extern NSString* const MilkAudioDeviceKey;
 
 // Starts listening again with the saved device, unless an audio file or the synthesiser was chosen.
 - (void)restartSystemAudio;
+
+// The folder presets are read from, with textures in its `textures` folder. Fixed when the
+// renderer is created.
++ (NSString*)presetsDirectory;
+// The folder used when the user has not chosen one.
++ (NSString*)defaultPresetsDirectory;
 
 - (void)setMotion:(int)motion;
 - (void)nextPreset;

@@ -4,7 +4,7 @@
 
 @class MilkRenderer;
 
-// The settings window: the audio device to listen to, and clearing the thumbnail cache or opening
+// The settings window: the audio device to listen to, the presets folder, and clearing the thumbnail cache or opening
 // its folder in Finder.
 @interface SettingsController : NSObject
 
