@@ -100,5 +100,4 @@ each library's source tree under `build/_deps/<name>-src`.
 
 The MIT licence covers this repository's code and documents. It does not cover MilkDrop presets,
 textures or the images rendered from them. Each preset has its own author and licence terms, or
-none. `presets/` is not tracked, and the `milkdrop-captures` branch holds images rendered from
-other people's presets.
+none. `presets/` is not tracked, and neither are the images rendered from other people's presets.

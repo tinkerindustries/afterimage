@@ -282,7 +282,7 @@ A single flat tone with almost no detail.
 
 ## Comparison with MilkDrop captures
 
-The `milkdrop-captures` branch holds 512x512 captures from Milkwave 4.1 (a DirectX 9 port of MilkDrop 2) of 170 presets, taken twice. `tools/compare_frames.py` scores how far two images are from each other, 0 for identical. Presets use random numbers, so MilkDrop is not identical to itself: its two runs score a median of 0.24 against each other. Rendered with `MILK_BANDS=1`, to use Milkwave's audio analysis, our frames score a median of 0.24 against the first run. 130 of 170 are within 0.05 of MilkDrop's own repeatability, and 95 are closer to MilkDrop than it is to itself. Rendering for 5.0 s matches best: on the presets MilkDrop repeats well, the mean score is 0.140 at 5.0 s and 0.175 at 5.5 s.
+The captures, which are not in this repository, are 512x512 captures from Milkwave 4.1 (a DirectX 9 port of MilkDrop 2) of 170 presets, taken twice. `tools/compare_frames.py` scores how far two images are from each other, 0 for identical. Presets use random numbers, so MilkDrop is not identical to itself: its two runs score a median of 0.24 against each other. Rendered with `MILK_BANDS=1`, to use Milkwave's audio analysis, our frames score a median of 0.24 against the first run. 130 of 170 are within 0.05 of MilkDrop's own repeatability, and 95 are closer to MilkDrop than it is to itself. Rendering for 5.0 s matches best: on the presets MilkDrop repeats well, the mean score is 0.140 at 5.0 s and 0.175 at 5.5 s.
 
 These presets score more than 0.2 above their own repeat-run score, so MilkDrop produces much the same frame each time and ours differs. Several depend on audio levels, which the sweep and Milkwave's analysis make hard to match, or on `rand_preset`.
 
