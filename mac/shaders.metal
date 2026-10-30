@@ -3,23 +3,28 @@ using namespace metal;
 
 // Warp pass: draws the 64x36 mesh over the whole target. Each vertex carries the point in the
 // previous frame it samples, so the GPU interpolates the warp between vertices. uvOrig is the
-// vertex's own position and radAng its MilkDrop rad and ang.
+// vertex's own position and radAng its MilkDrop rad and ang. alpha is 1 except during a blend
+// between presets, where it weights the new preset's pass against the old one's.
 struct WarpVertex {
     float2 position;
     float2 uv;
     float2 uvOrig;
     float2 radAng;
+    float alpha;
+    float pad;
 };
 
 struct WarpOut {
     float4 position [[position]];
     float2 uv;
+    float alpha;
 };
 
 vertex WarpOut warpVertex(uint vid [[vertex_id]], const device WarpVertex* verts [[buffer(0)]]) {
     WarpOut out;
     out.position = float4(verts[vid].position, 0.0, 1.0);
     out.uv = verts[vid].uv;
+    out.alpha = verts[vid].alpha;
     return out;
 }
 
@@ -28,7 +33,7 @@ fragment float4 warpFragment(WarpOut in [[stage_in]],
                              sampler linear [[sampler(0)]],
                              constant float& decay [[buffer(0)]]) {
     float3 colour = saturate(previous.sample(linear, in.uv).rgb) * decay;
-    return float4(colour, 1.0);
+    return float4(colour, in.alpha);
 }
 
 // Wave pass: quads along the waveform polyline, added onto the warped image.
@@ -96,7 +101,7 @@ struct PresetOut {
 vertex PresetOut presetWarpVertex(uint vid [[vertex_id]], const device WarpVertex* verts [[buffer(0)]]) {
     PresetOut out;
     out.position = float4(verts[vid].position, 0.0, 1.0);
-    out.diffuse = float4(1.0);
+    out.diffuse = float4(1.0, 1.0, 1.0, verts[vid].alpha);
     out.uv = float4(verts[vid].uv, verts[vid].uvOrig);
     out.radAng = verts[vid].radAng;
     return out;
@@ -110,7 +115,7 @@ vertex PresetOut presetCompVertex(uint vid [[vertex_id]],
     const float2 uv = verts[vid].uvOrig;
     PresetOut out;
     out.position = float4(verts[vid].position, 0.0, 1.0);
-    out.diffuse = mix(mix(corners[0], corners[1], uv.x), mix(corners[2], corners[3], uv.x), uv.y);
+    out.diffuse = float4(mix(mix(corners[0], corners[1], uv.x), mix(corners[2], corners[3], uv.x), uv.y).rgb, verts[vid].alpha);
     out.uv = float4(uv, uv);
     out.radAng = verts[vid].radAng;
     return out;
@@ -125,6 +130,8 @@ struct BlurUniforms {
     float bias;
     float edgeDarken;
     float pad;
+    float2 destTexel;
+    float2 pad2;
 };
 
 constant float BLUR_W[8] = {4.0, 3.8, 3.5, 2.9, 1.9, 1.2, 0.7, 0.3};
@@ -143,7 +150,11 @@ fragment float4 blurHorizontalFragment(QuadOut in [[stage_in]],
     const float d4 = 6.0 + 2.0 * BLUR_W[7] / w4;
     const float wDiv = 0.5 / (w1 + w2 + w3 + w4);
     const float2 texel = 1.0 / float2(source.get_width(), source.get_height());
-    const float2 uv = in.uv + texel;
+    // MilkDrop's blur shaders add texel offsets meant for Direct3D 9, which samples at whole pixel
+    // coordinates and flips the image on every blur pass. `at` is the point Direct3D 9 samples for
+    // this pixel, with the flip folded in, so the offsets land where they do in MilkDrop.
+    const float2 at = in.uv + float2(-0.5, 0.5) * u.destTexel;
+    const float2 uv = at + texel;
     float3 blur = (source.sample(linear, uv + float2(d1 * texel.x, 0.0)).rgb + source.sample(linear, uv - float2(d1 * texel.x, 0.0)).rgb) * w1 +
                   (source.sample(linear, uv + float2(d2 * texel.x, 0.0)).rgb + source.sample(linear, uv - float2(d2 * texel.x, 0.0)).rgb) * w2 +
                   (source.sample(linear, uv + float2(d3 * texel.x, 0.0)).rgb + source.sample(linear, uv - float2(d3 * texel.x, 0.0)).rgb) * w3 +
@@ -162,11 +173,12 @@ fragment float4 blurVerticalFragment(QuadOut in [[stage_in]],
     const float d2 = 2.0 + 2.0 * ((BLUR_W[6] + BLUR_W[7]) / w2);
     const float wDiv = 1.0 / ((w1 + w2) * 2.0);
     const float2 texel = 1.0 / float2(source.get_width(), source.get_height());
-    const float2 uv = in.uv + float2(texel.x, 0.0);
+    const float2 at = in.uv - 0.5 * u.destTexel;
+    const float2 uv = at + float2(texel.x, 0.0);
     float3 blur = (source.sample(linear, uv + float2(0.0, d1 * texel.y)).rgb + source.sample(linear, uv - float2(0.0, d1 * texel.y)).rgb) * w1 +
                   (source.sample(linear, uv + float2(0.0, d2 * texel.y)).rgb + source.sample(linear, uv - float2(0.0, d2 * texel.y)).rgb) * w2;
     blur *= wDiv;
-    float t = min(min(in.uv.x, in.uv.y), 1.0 - max(in.uv.x, in.uv.y));
+    float t = min(min(at.x, at.y), 1.0 - max(at.x, at.y));
     t = (1.0 - u.edgeDarken) + u.edgeDarken * saturate(sqrt(max(t, 0.0)) * 5.0);
     return float4(saturate(blur * t), 1.0);
 }
@@ -237,6 +249,9 @@ struct ClassicUniforms {
     int darken;
     int solarize;
     int invert;
+    float mainWeight;
+    float echoWeight;
+    float pad[2];
 };
 
 fragment float4 classicCompositeFragment(PresetOut in [[stage_in]],
@@ -247,9 +262,10 @@ fragment float4 classicCompositeFragment(PresetOut in [[stage_in]],
     float3 c = image.sample(linear, uv).rgb;
     if (u.echoAlpha > 0.001) {
         float2 echo = 0.5 + (uv - 0.5) / u.echoZoom;
-        if (u.echoOrient % 2 == 1) echo.x = 1.0 - echo.x;
+        // C's %, so a negative orientation stays negative: -1 and -3 flip u, -2 flips nothing.
+        if (u.echoOrient % 2 != 0) echo.x = 1.0 - echo.x;
         if (u.echoOrient >= 2) echo.y = 1.0 - echo.y;
-        c = c * (1.0 - u.echoAlpha) + image.sample(linear, echo).rgb * u.echoAlpha;
+        c = c * u.mainWeight + image.sample(linear, echo).rgb * u.echoWeight;
     }
     c = saturate(c * in.diffuse.rgb * u.gamma);
     if (u.brighten != 0) c = 1.0 - (1.0 - c) * (1.0 - c);

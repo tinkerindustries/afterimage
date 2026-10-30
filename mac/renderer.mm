@@ -5,6 +5,7 @@
 #include "custom_geometry.h"
 #include "feedback.h"
 #include "milk_audio.h"
+#include "milk_blend.h"
 #include "milk_preset.h"
 #include "milk_wave.h"
 #include "preset.h"
@@ -41,6 +42,16 @@ constexpr MTLPixelFormat FEEDBACK_FORMAT = MTLPixelFormatRGBA8Unorm;
 // MilkDrop's equations and shaders assume one step per frame at about this rate.
 constexpr NSInteger PRESET_FPS = 60;
 constexpr NSInteger MOTION_FPS = 120;
+// The centre row's vertices left of centre, which MilkDrop's shader warp draws twice: with ang +pi
+// for the cells above and -pi for the cells below. The copies for below follow the mesh.
+constexpr int SEAM_ROW = (MESH_Y - 1) / 2;
+constexpr int SEAM_COUNT = (MESH_X - 1) / 2;
+// Milkwave's shipped settings for automatic preset changes, in seconds.
+constexpr float TIME_BETWEEN_PRESETS = 60.0f;
+constexpr float BLEND_TIME_AUTO = 2.0f;
+constexpr float BLEND_TIME_USER = 1.0f;
+constexpr float HARD_CUT_LOUDNESS = 3.25f;
+constexpr float HARD_CUT_HALFLIFE = 60.0f;
 
 enum AudioSource : int {
     SOURCE_SYSTEM = 0,
@@ -50,6 +61,8 @@ enum AudioSource : int {
 
 struct WarpVertex {
     float x, y, u, v, u0, v0, rad, ang;
+    float alpha = 1.0f;
+    float pad = 0.0f;
 };
 
 struct WaveVertex {
@@ -72,6 +85,9 @@ struct ClassicUniforms {
     int darken;
     int solarize;
     int invert;
+    float mainWeight;
+    float echoWeight;
+    float pad[2];
 };
 
 struct BlurUniforms {
@@ -79,6 +95,8 @@ struct BlurUniforms {
     float bias;
     float edgeDarken;
     float pad;
+    float destTexel[2];
+    float pad2[2];
 };
 
 // One blur level's range. MilkDrop stores blurN as (value - min) / (max - min).
@@ -164,6 +182,22 @@ float squishToCenter(float x, float exponent) {
     return (1.0f - std::pow(1.0f - x * 2.0f, exponent)) * 0.5f;
 }
 
+// The preset being blended away from: it keeps running its equations, shapes, waves and shaders
+// until the blend ends.
+struct OldPreset {
+    std::unique_ptr<PresetPlayer> player;
+    std::unique_ptr<PresetGpu> gpu;
+    int compVersion = 0;
+    uint32_t seed = 0;
+    std::array<float, 4> randPreset{};
+    float startTime = 0.0f;
+    // Its file values, which MilkDrop keeps for the blend: the wave mode the main wave morphs from,
+    // and the video echo the MilkDrop 1 composite fades between.
+    int waveMode = 0;
+    float echoAlpha = 0.0f;
+    int echoOrient = 0;
+};
+
 } // namespace
 
 NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
@@ -216,6 +250,8 @@ NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
     uint32_t m_presetSeed;
     uint64_t m_frame;
     float m_presetStartTime;
+    // m_time on the session's first frame. The equations' time counts from it, so it is 0 there.
+    float m_timeOrigin;
     std::mt19937 m_random;
     std::array<float, 4> m_randPreset;
     std::vector<float> m_scratch;
@@ -225,12 +261,35 @@ NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
     std::vector<float> m_historyL;
     std::vector<float> m_historyR;
     MilkAudioFrame m_milkAudio;
+    WaveAligner m_aligner;
+    ShellBands m_shellBands;
+    FftShaderData m_fftData;
+    id<MTLTexture> m_fftTexture;
+    // MILK_MILKWAVE: follow Milkwave 4.1's changes to MilkDrop 2, to compare with its captures.
+    bool m_milkwave;
+    float m_nextPresetTime;
+    // A blend between presets is running while m_old is set.
+    std::unique_ptr<OldPreset> m_old;
+    float m_blendStart;
+    float m_blendDuration;
+    float m_blendProgress;
+    float m_snapPoint;
+    BlendPattern m_blendPattern;
+    std::vector<MeshUv> m_oldMesh;
+    FrameVars m_oldFrame;
+    std::vector<float> m_meshAlpha;
+    std::vector<WarpVertex> m_compVerts;
+    id<MTLRenderPipelineState> m_warpBlendPipeline;
+    bool m_presetLocked;
+    bool m_hardCuts;
+    float m_hardCutThresh;
     CustomGeometry m_custom;
     CustomGeometry m_vectors;
     std::vector<CustomShapeInstance> m_shapeInstances;
     std::vector<CustomWaveOutput> m_customWaves;
     MainWave m_mainWave;
     std::vector<MeshUv> m_mesh;
+    std::vector<MeshUv> m_prevMesh;
     std::vector<WarpVertex> m_gridBase;
     std::vector<WarpVertex> m_warpVerts;
     std::vector<WaveVertex> m_waveVerts;
@@ -264,6 +323,15 @@ NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
 
     m_device = device;
     m_queue = [m_device newCommandQueue];
+    m_milkwave = std::getenv("MILK_MILKWAVE") != nullptr;
+    m_nextPresetTime = -1.0f;
+    m_blendStart = 0.0f;
+    m_blendDuration = 1.0f;
+    m_blendProgress = 1.0f;
+    m_snapPoint = 0.5f;
+    m_presetLocked = false;
+    m_hardCuts = false;
+    m_hardCutThresh = HARD_CUT_LOUDNESS * 2.0f;
     m_drawableFormat = format;
     if (![self buildPipelines:format source:source error:error]) return nil;
     [self buildMeshIndices];
@@ -297,6 +365,7 @@ NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
     m_presetSeed = 0;
     m_frame = 0;
     m_presetStartTime = 0.0f;
+    m_timeOrigin = 0.0f;
     m_random.seed(1);
     m_bank = std::make_unique<TextureBank>(m_device, std::string(MILK_PRESET_DIR) + "/textures");
     return self;
@@ -317,6 +386,13 @@ NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
     desc.vertexFunction = [library newFunctionWithName:@"warpVertex"];
     desc.fragmentFunction = [library newFunctionWithName:@"warpFragment"];
     m_warpPipeline = [m_device newRenderPipelineStateWithDescriptor:desc error:&nsError];
+    desc.colorAttachments[0].blendingEnabled = YES;
+    desc.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+    desc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    desc.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+    desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorZero;
+    m_warpBlendPipeline = [m_device newRenderPipelineStateWithDescriptor:desc error:&nsError];
+    desc.colorAttachments[0].blendingEnabled = NO;
 
     desc.vertexFunction = [library newFunctionWithName:@"fullscreenVertex"];
     desc.fragmentFunction = [library newFunctionWithName:@"blurHorizontalFragment"];
@@ -381,11 +457,17 @@ NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
     std::vector<uint16_t> indices;
     for (int j = 0; j < MESH_Y - 1; ++j) {
         for (int i = 0; i < MESH_X - 1; ++i) {
-            const uint16_t a = static_cast<uint16_t>(j * MESH_X + i);
-            const uint16_t b = a + 1;
+            uint16_t a = static_cast<uint16_t>(j * MESH_X + i);
+            uint16_t b = a + 1;
             const uint16_t c = static_cast<uint16_t>(a + MESH_X);
             const uint16_t d = c + 1;
-            indices.insert(indices.end(), {a, b, c, b, d, c});
+            if (j == SEAM_ROW) {
+                const uint16_t seam = static_cast<uint16_t>(MESH_X * MESH_Y);
+                if (i < SEAM_COUNT) a = static_cast<uint16_t>(seam + i);
+                if (i + 1 < SEAM_COUNT) b = static_cast<uint16_t>(seam + i + 1);
+            }
+            // MilkDrop splits each cell along the diagonal from top-left to bottom-right.
+            indices.insert(indices.end(), {a, b, d, a, d, c});
         }
     }
     m_meshIndexCount = indices.size();
@@ -445,6 +527,7 @@ NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
         }
     }
     m_compGrid = [m_device newBufferWithBytes:verts.data() length:verts.size() * sizeof(WarpVertex) options:MTLResourceStorageModeShared];
+    m_compVerts = verts;
     m_compIndexCount = indices.size();
     m_compIndices = [m_device newBufferWithBytes:indices.data() length:indices.size() * sizeof(uint16_t) options:MTLResourceStorageModeShared];
 }
@@ -453,7 +536,7 @@ NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
     m_tapError.clear();
     if (m_tap.start(m_tapError)) {
         m_bands = std::make_unique<BandLevels>();
-    m_bands->useMilkwaveBands(std::getenv("MILK_BANDS") != nullptr);
+    m_bands->useMilkwaveBands(m_milkwave || std::getenv("MILK_BANDS") != nullptr);
         m_source = SOURCE_SYSTEM;
     } else {
         NSLog(@"System audio unavailable: %s", m_tapError.c_str());
@@ -484,31 +567,62 @@ NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
 - (void)selectPresetAtIndex:(NSInteger)index {
     if (index < 0 || index >= static_cast<NSInteger>(m_presetPaths.size())) return;
     m_presetIndex = static_cast<int>(index);
-    [self loadPresetAtPath:@(m_presetPaths[m_presetIndex].c_str())];
+    [self loadPresetAtPath:@(m_presetPaths[m_presetIndex].c_str()) blend:BLEND_TIME_USER];
 }
 
-- (void)stepPreset:(int)delta {
+- (void)stepPreset:(int)delta blend:(float)seconds {
     if (m_presetPaths.empty()) return;
     const int count = static_cast<int>(m_presetPaths.size());
     m_presetIndex = m_presetIndex < 0 ? (delta > 0 ? 0 : count - 1) : ((m_presetIndex + delta) % count + count) % count;
-    [self loadPresetAtPath:@(m_presetPaths[m_presetIndex].c_str())];
+    [self loadPresetAtPath:@(m_presetPaths[m_presetIndex].c_str()) blend:seconds];
 }
 
-- (BOOL)loadPresetAtPath:(NSString*)path {
+- (void)stepPreset:(int)delta { [self stepPreset:delta blend:BLEND_TIME_USER]; }
+
+- (BOOL)loadPresetAtPath:(NSString*)path { return [self loadPresetAtPath:path blend:0.0f]; }
+
+// Loads a preset. With `seconds` above 0 and a preset playing, MilkDrop blends from the playing
+// preset to the new one over that time.
+- (BOOL)loadPresetAtPath:(NSString*)path blend:(float)seconds {
     PresetFile file;
     std::string error;
-    m_gpu.reset();
     if (!loadPresetFile(path.UTF8String, file, error)) {
         NSLog(@"%s", error.c_str());
-        m_player.reset();
         return NO;
     }
+    if (seconds > 0.0f && m_player) {
+        m_old = std::make_unique<OldPreset>();
+        m_old->waveMode = static_cast<int>(m_player->baseValue("wave_mode", 0.0));
+        m_old->echoAlpha = static_cast<float>(m_player->baseValue("echo_alpha", 0.0));
+        m_old->echoOrient = static_cast<int>(m_player->baseValue("echo_orient", 0.0));
+        m_old->player = std::move(m_player);
+        m_old->gpu = std::move(m_gpu);
+        m_old->compVersion = m_compVersion;
+        m_old->seed = m_presetSeed;
+        m_old->randPreset = m_randPreset;
+        m_old->startTime = m_presetStartTime;
+        m_blendStart = m_time;
+        m_blendDuration = seconds;
+        m_blendProgress = 0.0f;
+        // MilkDrop 2 picks a wipe, plasma or radial pattern; Milkwave picks from its 19.
+        const int type = m_milkwave ? static_cast<int>(m_random() % 19) : 1 + static_cast<int>(m_random() % 3);
+        const float aspectX = m_textures[0] && m_textures[0].height > m_textures[0].width
+                                  ? static_cast<float>(m_textures[0].width) / m_textures[0].height : 1.0f;
+        const float aspectY = m_textures[0] && m_textures[0].width > m_textures[0].height
+                                  ? static_cast<float>(m_textures[0].height) / m_textures[0].width : 1.0f;
+        makeBlendPattern(type, MESH_X - 1, MESH_Y - 1, aspectX, aspectY, m_random, m_blendPattern);
+    } else {
+        m_old.reset();
+    }
+    m_gpu.reset();
+    if (m_milkwave) applyMilkwaveRules(file);
     m_player = std::make_unique<PresetPlayer>(file);
     for (const std::string& e : m_player->errors()) NSLog(@"%s: %s", file.name.c_str(), e.c_str());
     m_presetSeed = m_random();
     // The equations' time and frame run from the start of the session. Shaders see time since this
     // preset started.
     m_presetStartTime = m_time;
+    m_nextPresetTime = -1.0f;
     m_player->setFrame(m_frame);
     std::uniform_real_distribution<float> unit(0.0f, 1.0f);
     m_randPreset = {unit(m_random), unit(m_random), unit(m_random), unit(m_random)};
@@ -527,7 +641,7 @@ NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
     }
     if (!warpCode.empty() || !compCode.empty()) {
         m_gpu = std::make_unique<PresetGpu>(m_device, m_presetWarpVertex, m_presetCompVertex, FEEDBACK_FORMAT,
-                                            m_drawableFormat, *m_bank, warpCode, compCode, m_presetSeed);
+                                            m_drawableFormat, *m_bank, warpCode, compCode, m_presetSeed, m_milkwave);
         for (const std::string& e : m_gpu->errors()) NSLog(@"%s: %s", file.name.c_str(), e.c_str());
     }
     [[NSNotificationCenter defaultCenter] postNotificationName:MilkPresetDidChangeNotification object:self];
@@ -535,6 +649,30 @@ NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
 }
 
 - (void)nextPreset { [self stepPreset:1]; }
+
+- (void)togglePresetLock { m_presetLocked = !m_presetLocked; }
+
+- (void)toggleHardCuts { m_hardCuts = !m_hardCuts; }
+
+// MilkDrop's automatic changes: the next preset after TIME_BETWEEN_PRESETS plus the blend time,
+// and, with hard cuts on, a cut when bass + mid + treb pass three times a threshold that doubles
+// at each cut and decays back towards HARD_CUT_LOUDNESS. The lock stops both.
+- (void)updatePresetTimer:(const AudioLevels&)levels fps:(float)fps {
+    if (m_nextPresetTime < 0.0f) m_nextPresetTime = m_time + BLEND_TIME_AUTO + TIME_BETWEEN_PRESETS;
+    if (m_presetLocked || m_presetPaths.empty()) return;
+    if (m_nextPresetTime < m_time) {
+        [self stepPreset:1 blend:BLEND_TIME_AUTO];
+        return;
+    }
+    if (!m_hardCuts || fps <= 1.0f) return;
+    if (levels.bass + levels.mid + levels.treb > m_hardCutThresh * 3.0f) {
+        m_hardCutThresh *= 2.0f;
+        [self stepPreset:1 blend:0.0f];
+    } else {
+        const float perFrame = std::exp(-1.3863f / (HARD_CUT_HALFLIFE * fps));
+        m_hardCutThresh = (m_hardCutThresh - HARD_CUT_LOUDNESS) * perFrame + HARD_CUT_LOUDNESS;
+    }
+}
 
 - (void)previousPreset { [self stepPreset:-1]; }
 
@@ -565,7 +703,7 @@ NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
     m_fileL.assign(left, left + count);
     m_fileR.assign(right, right + count);
     m_bands = std::make_unique<BandLevels>();
-    m_bands->useMilkwaveBands(std::getenv("MILK_BANDS") != nullptr);
+    m_bands->useMilkwaveBands(m_milkwave || std::getenv("MILK_BANDS") != nullptr);
     // Run the band averages over up to two seconds before the start, so the first frames are not
     // measured against an empty average.
     const size_t lead = std::min<size_t>(start, 2 * SAMPLE_RATE);
@@ -573,6 +711,7 @@ NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
     for (size_t at = start - lead; at + mono.size() <= start; at += mono.size()) {
         m_bands->update(m_fileL.data() + at, static_cast<int>(mono.size()), 1.0f, m_fileR.data() + at);
     }
+    m_aligner.reset();
     m_filePos = start;
     m_source = SOURCE_FILE;
 }
@@ -591,6 +730,8 @@ NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
         std::string notes;
         if (m_gpu && !m_gpu->errors().empty()) notes += ", shader errors";
         if (!m_player->errors().empty()) notes += ", code errors";
+        if (m_presetLocked) notes += ", locked";
+        if (m_hardCuts) notes += ", hard cuts";
         return [NSString stringWithFormat:@"Milk: %s (%d/%zu%s), %s", m_player->name().c_str(), m_presetIndex + 1,
                                           m_presetPaths.size(), notes.c_str(), audio.c_str()];
     }
@@ -645,13 +786,18 @@ NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
             const float u = static_cast<float>(i) / (MESH_X - 1);
             const float v = static_cast<float>(j) / (MESH_Y - 1);
             const float x = u * 2.0f - 1.0f;
-            const float y = -(v * 2.0f - 1.0f);
+            const float y = 1.0f - v * 2.0f;
             m_gridBase[j * MESH_X + i] = WarpVertex{
                 x, y, u, v, u, v,
                 std::sqrt(x * x * aspectX * aspectX + y * y * aspectY * aspectY),
                 std::atan2(y * aspectY, x * aspectX),
             };
         }
+    }
+    for (int i = 0; i < SEAM_COUNT; ++i) {
+        WarpVertex seam = m_gridBase[SEAM_ROW * MESH_X + i];
+        seam.ang = -3.1415926535898f;
+        m_gridBase.push_back(seam);
     }
 }
 
@@ -696,7 +842,7 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
             // synth through it first, as a MilkDrop session would already have its averages.
             if (!m_bands) {
                 m_bands = std::make_unique<BandLevels>();
-    m_bands->useMilkwaveBands(std::getenv("MILK_BANDS") != nullptr);
+                m_bands->useMilkwaveBands(m_milkwave || std::getenv("MILK_BANDS") != nullptr);
                 SynthState lead = m_synth;
                 std::vector<float> block(SAMPLE_RATE / 60);
                 for (int i = 0; i < 120; ++i) {
@@ -718,12 +864,31 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
 
 // The equations give a displacement per 60 Hz frame. frameScale stretches it to this frame's length.
 - (void)buildWarpVertices:(const FrameVars&)f perVertex:(const PerVertexFn&)perVertex levels:(const AudioLevels&)levels width:(int)width height:(int)height frameScale:(float)frameScale {
+    m_prevMesh = m_mesh;
     computeMesh(f, perVertex, levels, m_time, width, height, m_mesh);
+    m_meshAlpha.assign(m_mesh.size(), 1.0f);
+    if (m_old) {
+        // MilkDrop works out both presets' warps and mixes each vertex's source point by the blend
+        // pattern, which also gives the vertex the alpha that weights the new preset's pass. Both
+        // use the new preset's warp speed and scale.
+        FrameVars old = m_oldFrame;
+        old.warpSpeed = f.warpSpeed;
+        old.warpScale = f.warpScale;
+        computeMesh(old, m_old->player->perVertex(), levels, m_time, width, height, m_oldMesh);
+        for (size_t k = 0; k < m_mesh.size(); ++k) {
+            const float mix = std::clamp(m_blendPattern.a[k] * m_blendProgress + m_blendPattern.c[k], 0.0f, 1.0f);
+            m_mesh[k].u = m_mesh[k].u * mix + m_oldMesh[k].u * (1.0f - mix);
+            m_mesh[k].v = m_mesh[k].v * mix + m_oldMesh[k].v * (1.0f - mix);
+            m_meshAlpha[k] = std::floor(mix * 255.0f) / 255.0f;
+        }
+    }
     m_warpVerts = m_gridBase;
     for (size_t k = 0; k < m_warpVerts.size(); ++k) {
         WarpVertex& v = m_warpVerts[k];
-        v.u = v.u0 + (m_mesh[k].u - v.u0) * frameScale;
-        v.v = v.v0 + (m_mesh[k].v - v.v0) * frameScale;
+        const size_t source = k < m_mesh.size() ? k : SEAM_ROW * MESH_X + (k - m_mesh.size());
+        v.u = v.u0 + (m_mesh[source].u - v.u0) * frameScale;
+        v.v = v.v0 + (m_mesh[source].v - v.v0) * frameScale;
+        v.alpha = m_meshAlpha[source];
     }
 }
 
@@ -776,30 +941,45 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
 
 // The shader header's uniforms for this frame, following MilkDrop 2's layout of _c0.._c13.
 - (ShaderFrameValues)shaderValues:(const AudioLevels&)a width:(int)width height:(int)height fps:(float)fps {
+    return [self shaderValues:a width:width height:height fps:fps player:*m_player seed:m_presetSeed randPreset:m_randPreset start:m_presetStartTime];
+}
+
+// The same for any preset, so a blend can feed the outgoing preset's shaders its own values.
+- (ShaderFrameValues)shaderValues:(const AudioLevels&)a
+                            width:(int)width
+                           height:(int)height
+                              fps:(float)fps
+                           player:(PresetPlayer&)player
+                             seed:(uint32_t)presetSeed
+                       randPreset:(const std::array<float, 4>&)rp
+                            start:(float)presetStartTime {
     ShaderFrameValues out;
     const float w = static_cast<float>(width), h = static_cast<float>(height);
     const float aspectX = (h > w) ? w / h : 1.0f;
     const float aspectY = (w > h) ? h / w : 1.0f;
     const float t = m_time;
-    const float sincePreset = m_time - m_presetStartTime;
+    const float sincePreset = m_time - presetStartTime;
     const float presetTime = sincePreset - static_cast<int>(sincePreset / 10000.0f) * 10000.0f;
     std::uniform_real_distribution<float> unit(0.0f, 1.0f);
     BlurRange blur[3];
     const std::array<BlurRange, 3> ranges = [self blurRanges];
     for (int i = 0; i < 3; ++i) blur[i] = ranges[i];
-    const auto& rp = m_randPreset;
 
     out.vectors["rand_frame"] = {unit(m_random), unit(m_random), unit(m_random), unit(m_random)};
     out.vectors["rand_preset"] = rp;
     out.vectors["_c0"] = {aspectX, aspectY, 1.0f / aspectX, 1.0f / aspectY};
     out.vectors["_c1"] = {0.0f, 0.0f, 0.0f, 0.0f};
-    out.vectors["_c2"] = {presetTime, fps, static_cast<float>(m_frame), static_cast<float>(m_player->frameValue("progress"))};
+    out.vectors["_c2"] = {presetTime, fps, static_cast<float>(m_frame), static_cast<float>(player.frameValue("progress"))};
     // MilkDrop writes vol as 0.3333f * (bass, mid, treb), a comma expression that keeps only treb.
     out.vectors["_c3"] = {a.bass, a.mid, a.treb, 0.3333f * a.treb};
     out.vectors["_c4"] = {a.bassAtt, a.midAtt, a.trebAtt, 0.3333f * a.trebAtt};
     out.vectors["_c5"] = {blur[0].max - blur[0].min, blur[0].min, blur[1].max - blur[1].min, blur[1].min};
     out.vectors["_c6"] = {blur[2].max - blur[2].min, blur[2].min, blur[0].min, blur[0].max};
     out.vectors["_c7"] = {w, h, 1.0f / w, 1.0f / h};
+    for (int i = 0; i < 3; ++i) {
+        const float bw = static_cast<float>(m_blur[i].width), bh = static_cast<float>(m_blur[i].height);
+        out.vectors["texsize_blur" + std::to_string(i + 1)] = {bw, bh, 1.0f / bw, 1.0f / bh};
+    }
     const float roam[4] = {0.329f, 1.293f, 5.070f, 20.051f};
     const float roamPhase[4] = {1.2f, 3.9f, 2.5f, 5.4f};
     const float slow[4] = {0.0050f, 0.0085f, 0.0133f, 0.0217f};
@@ -819,16 +999,25 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     const float mip = std::log(w) / std::log(2.0f);
     out.vectors["_c12"] = {mip, mip, mip, 0.0f};
     out.vectors["_c13"] = {blur[1].min, blur[1].max, blur[2].min, blur[2].max};
+    if (m_milkwave) {
+        // Milkwave's mouse (centred, never clicked here), smoothed bands, vis settings and colour
+        // shift, at their defaults. vol_smooth keeps only treb_smooth, as Milkwave's comma
+        // expression does.
+        out.vectors["_c14"] = {0.5f, 0.5f, 0.0f, 0.0f};
+        out.vectors["_c15"] = {a.bassSmooth, a.midSmooth, a.trebSmooth, 0.3333f * a.trebSmooth};
+        out.vectors["_c16"] = {1.0f, 0.0f, 1.0f, 0.0f};
+        out.vectors["_c17"] = {0.0f, 0.0f, 0.0f, 0.0f};
+    }
     const char* qNames[8] = {"_qa", "_qb", "_qc", "_qd", "_qe", "_qf", "_qg", "_qh"};
     for (int i = 0; i < 8; ++i) {
-        out.vectors[qNames[i]] = {m_player->q(i * 4), m_player->q(i * 4 + 1), m_player->q(i * 4 + 2), m_player->q(i * 4 + 3)};
+        out.vectors[qNames[i]] = {player.q(i * 4), player.q(i * 4 + 1), player.q(i * 4 + 2), player.q(i * 4 + 3)};
     }
 
     // Rotation matrices: 20 per-preset ones (s, d, f, vf, uf in groups of four) that spin faster
     // the higher their index, and four fresh random ones each frame. A preset's translation, base
     // angles and spin directions come from its seed.
     const char* GROUPS[] = {"rot_s", "rot_d", "rot_f", "rot_vf", "rot_uf"};
-    std::mt19937 seeded(m_presetSeed);
+    std::mt19937 seeded(presetSeed);
     std::uniform_real_distribution<float> seedUnit(0.0f, 1.0f);
     for (int k = 0; k < 20; ++k) {
         float translate[3], base[3], speed[3];
@@ -855,9 +1044,10 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     const float amount = classic ? static_cast<float>(m_player->baseValue("fshader", 0.0)) : 1.0f;
     for (int i = 0; i < 4; ++i) {
         float c[3] = {
-            0.6f + 0.3f * std::sin(m_time * 30.0f * 0.0143f + 3.0f + i * 21.0f + m_randPreset[3]),
-            0.6f + 0.3f * std::sin(m_time * 30.0f * 0.0107f + 1.0f + i * 13.0f + m_randPreset[1]),
-            0.6f + 0.3f * std::sin(m_time * 30.0f * 0.0129f + 6.0f + i * 9.0f + m_randPreset[2]),
+            // MilkDrop adds m_fRandStart here, which nothing sets, so it is always 0.
+            0.6f + 0.3f * std::sin(m_time * 30.0f * 0.0143f + 3.0f + i * 21.0f),
+            0.6f + 0.3f * std::sin(m_time * 30.0f * 0.0107f + 1.0f + i * 13.0f),
+            0.6f + 0.3f * std::sin(m_time * 30.0f * 0.0129f + 6.0f + i * 9.0f),
         };
         const float peak = std::max({c[0], c[1], c[2]});
         for (int k = 0; k < 3; ++k) {
@@ -872,6 +1062,14 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
             std::swap(out[k], out[4 + k]);
             std::swap(out[8 + k], out[12 + k]);
         }
+    } else {
+        // MilkDrop 1's quad runs bottom-left, bottom-right, top-left, top-right, and passes its
+        // colours as truncated bytes.
+        for (int k = 0; k < 4; ++k) {
+            std::swap(out[k], out[8 + k]);
+            std::swap(out[4 + k], out[12 + k]);
+        }
+        for (int k = 0; k < 16; ++k) out[k] = std::floor(out[k] * 255.0f) / 255.0f;
     }
 }
 
@@ -888,12 +1086,15 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     [encoder setRenderPipelineState:pipeline];
     [encoder setFragmentTexture:source atIndex:0];
     [encoder setFragmentSamplerState:m_clampSampler atIndex:0];
-    [encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
+    BlurUniforms withTarget = uniforms;
+    withTarget.destTexel[0] = 1.0f / static_cast<float>(target.width);
+    withTarget.destTexel[1] = 1.0f / static_cast<float>(target.height);
+    [encoder setFragmentBytes:&withTarget length:sizeof(withTarget) atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [encoder endEncoding];
 }
 
-// Builds blur1..levels from the finished frame, as MilkDrop does. The horizontal pass also
+// Builds blur1..levels from `image`, as MilkDrop does. The horizontal pass also
 // converts the source's stored range to this level's, and only the first level darkens the edges.
 - (void)encodeBlur:(id<MTLCommandBuffer>)commands from:(id<MTLTexture>)image levels:(int)levels {
     const std::array<BlurRange, 3> range = [self blurRanges];
@@ -920,43 +1121,110 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
 
 // MilkDrop 1's composite. Gamma is drawn as repeated additive passes in MilkDrop: with video echo
 // the passes add up to max(gamma, 1), without it to gamma.
+// Milkwave's FFT texture: smoothed magnitudes in the first row and their peaks in the second.
+- (void)updateFftTexture {
+    if (m_fftTexture == nil) {
+        MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
+                                                                                        width:FftShaderData::BINS
+                                                                                       height:2
+                                                                                    mipmapped:NO];
+        desc.usage = MTLTextureUsageShaderRead;
+        desc.storageMode = MTLStorageModeShared;
+        m_fftTexture = [m_device newTextureWithDescriptor:desc];
+    }
+    const float attack = std::clamp(static_cast<float>(m_player->baseValue("fftattack", 0.5)), 0.0f, 1.0f);
+    const float decay = std::clamp(static_cast<float>(m_player->baseValue("fftdecay", 0.7)), 0.0f, 1.0f);
+    m_fftData.update(m_historyL.data(), m_historyR.data(), STEREO_HISTORY, attack, decay);
+    [m_fftTexture replaceRegion:MTLRegionMake2D(0, 0, FftShaderData::BINS, 1) mipmapLevel:0 withBytes:m_fftData.smoothed().data()
+                    bytesPerRow:FftShaderData::BINS * sizeof(float)];
+    [m_fftTexture replaceRegion:MTLRegionMake2D(0, 1, FftShaderData::BINS, 1) mipmapLevel:0 withBytes:m_fftData.peak().data()
+                    bytesPerRow:FftShaderData::BINS * sizeof(float)];
+}
+
+// The comp grid for a blend: each vertex's alpha is the warp mesh's blend alpha there, found as
+// MilkDrop finds it, scaling the position by the mesh's vertex count rather than its cell count.
+- (id<MTLBuffer>)compGridWithBlendAlpha {
+    std::vector<WarpVertex> verts = m_compVerts;
+    const int gx = MESH_X - 1, gy = MESH_Y - 1;
+    // MilkDrop counts mesh rows from the bottom.
+    auto alphaAt = [&](int i, int rowFromBottom) { return m_meshAlpha[(gy - rowFromBottom) * MESH_X + i]; };
+    for (WarpVertex& v : verts) {
+        const float x = std::clamp((v.x * 0.5f + 0.5f) * (gx + 1), 0.0f, static_cast<float>(gx - 1));
+        const float y = std::clamp((v.y * 0.5f + 0.5f) * (gy + 1), 0.0f, static_cast<float>(gy - 1));
+        const int nx = static_cast<int>(x), ny = static_cast<int>(y);
+        const float dx = x - nx, dy = y - ny;
+        v.alpha = alphaAt(nx, ny) * (1 - dx) * (1 - dy) + alphaAt(nx + 1, ny) * dx * (1 - dy) + alphaAt(nx, ny + 1) * (1 - dx) * dy +
+                  alphaAt(nx + 1, ny + 1) * dx * dy;
+    }
+    return [m_device newBufferWithBytes:verts.data() length:verts.size() * sizeof(WarpVertex) options:MTLResourceStorageModeShared];
+}
+
+// The texture addressing MilkDrop leaves set on sampler 0 after the warp and blur, which its
+// textured shapes and MilkDrop 1 composite inherit: clamp when the blur ran, wrap after a warp
+// shader, and otherwise the preset's wrap flag.
+- (id<MTLSamplerState>)leftoverSampler {
+    if (m_gpu && m_gpu->blurLevels() > 0) return m_clampSampler;
+    if (m_gpu && m_gpu->hasWarp()) return m_repeatSampler;
+    return m_player->frameValue("wrap") > 0.5 ? m_repeatSampler : m_clampSampler;
+}
+
 - (void)encodeClassicComposite:(id<MTLRenderCommandEncoder>)encoder image:(id<MTLTexture>)image {
-    auto flag = [&](const char* name) { return std::fabs(m_player->frameValue(name)) > 0.00001 ? 1 : 0; };
+    auto flag = [&](const char* name) { return m_player->frameValue(name) != 0.0 ? 1 : 0; };
     const float gamma = std::clamp(static_cast<float>(m_player->frameValue("gamma")), 0.0f, 8.0f);
-    const float echoAlpha = static_cast<float>(m_player->frameValue("echo_alpha"));
+    float echoAlpha = static_cast<float>(m_player->frameValue("echo_alpha"));
+    int echoOrient = static_cast<int>(m_player->frameValue("echo_orient")) % 4;
+    // Blending between two presets that both echo, in different orientations, fades the old echo
+    // out and the new one in rather than flipping it.
+    if (m_old && m_player->baseValue("echo_alpha", 0.0) > 0.01 && m_old->echoAlpha > 0.01 &&
+        static_cast<int>(m_player->baseValue("echo_orient", 0.0)) != m_old->echoOrient) {
+        if (m_blendProgress < m_snapPoint) {
+            echoOrient = m_old->echoOrient;
+            echoAlpha *= 1.0f - 2.0f * cosineInterp(m_blendProgress);
+        } else {
+            echoAlpha *= 2.0f * cosineInterp(m_blendProgress) - 1.0f;
+        }
+    }
+    // MilkDrop weights the two passes through colour bytes, so an echo_alpha outside 0..1 wraps.
+    auto byte = [](float v) {
+        const float scaled = v * 255.0f;
+        if (!std::isfinite(scaled) || std::fabs(scaled) >= 2147483648.0f) return 0.0f;
+        return static_cast<float>(static_cast<int>(scaled) & 0xFF) / 255.0f;
+    };
     ClassicUniforms uniforms{
         echoAlpha > 0.001f ? std::max(gamma, 1.0f) : gamma,
-        std::clamp(echoAlpha, 0.0f, 1.0f),
-        std::max(static_cast<float>(m_player->frameValue("echo_zoom")), 0.001f),
-        ((static_cast<int>(m_player->frameValue("echo_orient")) % 4) + 4) % 4,
+        echoAlpha,
+        static_cast<float>(m_player->frameValue("echo_zoom")),
+        echoOrient,
         flag("brighten"),
         flag("darken"),
         flag("solarize"),
         flag("invert"),
+        byte(1.0f - echoAlpha),
+        byte(echoAlpha),
+        {0.0f, 0.0f},
     };
     float corners[16];
     [self hueCorners:corners classic:YES];
-    id<MTLBuffer> grid = [m_device newBufferWithBytes:m_gridBase.data()
-                                               length:m_gridBase.size() * sizeof(WarpVertex)
-                                              options:MTLResourceStorageModeShared];
+    // One quad, as MilkDrop draws it, so the tint interpolates across each of its two triangles,
+    // split from top-left to bottom-right.
+    const WarpVertex quad[6] = {
+        {-1, -1, 0, 1, 0, 1, 0, 0}, {1, -1, 1, 1, 1, 1, 0, 0}, {-1, 1, 0, 0, 0, 0, 0, 0},
+        {1, -1, 1, 1, 1, 1, 0, 0},  {-1, 1, 0, 0, 0, 0, 0, 0}, {1, 1, 1, 0, 1, 0, 0, 0},
+    };
     [encoder setRenderPipelineState:m_classicPipeline];
-    [encoder setVertexBuffer:grid offset:0 atIndex:0];
+    [encoder setVertexBytes:quad length:sizeof(quad) atIndex:0];
     [encoder setVertexBytes:corners length:sizeof(corners) atIndex:1];
     [encoder setFragmentTexture:image atIndex:0];
-    [encoder setFragmentSamplerState:m_clampSampler atIndex:0];
+    [encoder setFragmentSamplerState:[self leftoverSampler] atIndex:0];
     [encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
-    [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-                        indexCount:m_meshIndexCount
-                         indexType:MTLIndexTypeUInt16
-                       indexBuffer:m_meshIndices
-                 indexBufferOffset:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
 }
 
 // The main waveform's settings for this frame: per-frame variables, plus the values MilkDrop
 // only reads from the preset file.
 - (MainWaveSettings)mainWaveSettings:(const AudioLevels&)levels {
     PresetPlayer& p = *m_player;
-    auto on = [&](const char* name) { return std::fabs(p.frameValue(name)) > 0.00001; };
+    auto on = [&](const char* name) { return p.frameValue(name) != 0.0; };
     MainWaveSettings s;
     s.mode = static_cast<int>(p.frameValue("wave_mode"));
     s.x = static_cast<float>(p.frameValue("wave_x"));
@@ -978,33 +1246,49 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     s.time = m_time;
     s.vol = 0.333f * (levels.bass + levels.mid + levels.treb);
     s.treb = m_bands ? m_bands->rawTreble() : levels.treb;
+    s.modeCount = m_milkwave ? 18 : 8;
+    s.bass = levels.bass;
+    s.mid = levels.mid;
+    if (m_old) {
+        s.blending = true;
+        s.oldMode = m_old->waveMode;
+        s.blendMix = cosineInterp(m_blendProgress);
+    }
     return s;
 }
 
 // MilkDrop's outer border runs in from the screen edge by ob_size (in clip units, where the
 // screen is 2 across), and the inner border continues in from there by ib_size.
-// Where the warp samples from at (u, v), by bilinear interpolation of this frame's mesh.
-- (void)warpSourceAt:(float)u v:(float)v outU:(float&)su outV:(float&)sv {
+// Where the warp samples from at (u, v), by bilinear interpolation of `mesh`. With no mesh yet,
+// every point samples itself.
+- (void)warpSourceAt:(float)u v:(float)v mesh:(const std::vector<MeshUv>&)mesh outU:(float&)su outV:(float&)sv {
+    if (mesh.size() < static_cast<size_t>(MESH_X * MESH_Y)) {
+        su = u;
+        sv = v;
+        return;
+    }
     const float gx = std::clamp(u, 0.0f, 1.0f) * (MESH_X - 1);
     const float gy = std::clamp(v, 0.0f, 1.0f) * (MESH_Y - 1);
     const int i0 = std::min(static_cast<int>(gx), MESH_X - 2);
     const int j0 = std::min(static_cast<int>(gy), MESH_Y - 2);
     const float fx = gx - i0, fy = gy - j0;
-    const MeshUv& a = m_mesh[j0 * MESH_X + i0];
-    const MeshUv& b = m_mesh[j0 * MESH_X + i0 + 1];
-    const MeshUv& c = m_mesh[(j0 + 1) * MESH_X + i0];
-    const MeshUv& d = m_mesh[(j0 + 1) * MESH_X + i0 + 1];
+    const MeshUv& a = mesh[j0 * MESH_X + i0];
+    const MeshUv& b = mesh[j0 * MESH_X + i0 + 1];
+    const MeshUv& c = mesh[(j0 + 1) * MESH_X + i0];
+    const MeshUv& d = mesh[(j0 + 1) * MESH_X + i0 + 1];
     su = (a.u * (1 - fx) + b.u * fx) * (1 - fy) + (c.u * (1 - fx) + d.u * fx) * fy;
     sv = (a.v * (1 - fx) + b.v * fx) * (1 - fy) + (c.v * (1 - fx) + d.v * fx) * fy;
 }
 
 // MilkDrop's motion vectors: a grid of mv_x by mv_y short lines, each from a grid point towards
 // where the warp pulls that point from, scaled by mv_l. They are drawn onto the previous frame
-// before it is warped, so they smear along the flow.
+// before it is warped, so they smear along the flow. MilkDrop draws them before it computes this
+// frame's mesh, so they follow the previous frame's, and it looks the mesh up at the vertically
+// mirrored point with the y part negated and its half-texel offset left in.
 - (void)encodeMotionVectors:(id<MTLCommandBuffer>)commands onto:(id<MTLTexture>)image {
     auto value = [&](const char* name) { return static_cast<float>(m_player->frameValue(name)); };
     const float alpha = value("mv_a");
-    if (alpha < 0.0001f) return;
+    if (!(alpha >= 0.001f)) return;
     int countX = static_cast<int>(value("mv_x"));
     int countY = static_cast<int>(value("mv_y"));
     if (countX <= 0 || countY <= 0) return;
@@ -1021,8 +1305,13 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     const int height = static_cast<int>(image.height);
     // MilkDrop's shortest trail is one pixel of the image's width, in texture units.
     const float minimum = 1.0f / width;
-    const float colour[4] = {std::clamp(value("mv_r"), 0.0f, 1.0f), std::clamp(value("mv_g"), 0.0f, 1.0f),
-                             std::clamp(value("mv_b"), 0.0f, 1.0f), std::min(alpha, 1.0f)};
+    // Colour bytes wrap, as MilkDrop's D3DCOLOR_RGBA_01 does.
+    auto byte = [](float v) {
+        const float scaled = v * 255.0f;
+        if (!std::isfinite(scaled) || std::fabs(scaled) >= 2147483648.0f) return 0.0f;
+        return static_cast<float>(static_cast<int>(scaled) & 0xFF) / 255.0f;
+    };
+    const float colour[4] = {byte(value("mv_r")), byte(value("mv_g")), byte(value("mv_b")), byte(alpha)};
 
     const bool none[CUSTOM_COUNT] = {};
     m_vectors.begin(width, height, none);
@@ -1032,9 +1321,11 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
         for (int x = 0; x < countX; ++x) {
             const float u = (x + 0.25f) / (countX + divertX + 0.25f - 1.0f) + offsetX;
             if (u <= 0.0001f || u >= 0.9999f) continue;
+            const float m = 1.0f - v;
             float su, sv;
-            [self warpSourceAt:u v:v outU:su outV:sv];
-            float dx = (su - u) * length, dy = (sv - v) * length;
+            [self warpSourceAt:u v:m mesh:m_prevMesh outU:su outV:sv];
+            float dx = (su - u + 0.5f / width) * length;
+            float dy = (m - sv - 0.5f / height) * length;
             const float len = std::hypot(dx, dy);
             if (len <= minimum) {
                 if (len > 1e-8f) {
@@ -1061,7 +1352,10 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     [encoder setRenderPipelineState:m_customPipelines[0][0]];
     [encoder setVertexBuffer:buffer offset:0 atIndex:0];
     [encoder setVertexBytes:viewport length:sizeof(viewport) atIndex:1];
-    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:verts.size()];
+    for (const CustomBatch& batch : m_vectors.batches()) {
+        if (batch.count == 0) continue;
+        [encoder drawPrimitives:(batch.lines ? MTLPrimitiveTypeLine : MTLPrimitiveTypeTriangle) vertexStart:batch.first vertexCount:batch.count];
+    }
     [encoder endEncoding];
 }
 
@@ -1069,7 +1363,7 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     auto value = [&](const char* name) { return static_cast<float>(m_player->frameValue(name)); };
     auto colour = [&](const char* prefix, float out[4]) {
         const char* channels[4] = {"_r", "_g", "_b", "_a"};
-        for (int i = 0; i < 4; ++i) out[i] = std::clamp(value((std::string(prefix) + channels[i]).c_str()), 0.0f, 1.0f);
+        for (int i = 0; i < 4; ++i) out[i] = value((std::string(prefix) + channels[i]).c_str());
     };
     const float outerSize = value("ob_size");
     const float innerSize = value("ib_size");
@@ -1089,7 +1383,36 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
               height:(int)height {
     m_player->runCustomShapes(m_shapeInstances);
     buildMilkAudioFrame(m_historyL.data(), m_historyR.data(), STEREO_HISTORY, m_milkAudio);
+    m_shellBands.update(m_milkAudio, static_cast<float>(PRESET_FPS));
+    m_aligner.apply(m_milkAudio);
     m_player->runCustomWaves(m_milkAudio, m_customWaves);
+    // During a blend MilkDrop draws both presets' shapes and waves, the new preset's faded in by
+    // the blend's progress and the old one's faded out.
+    std::vector<CustomShapeInstance> oldShapes;
+    std::vector<CustomWaveOutput> oldWaves;
+    if (m_old) {
+        const float fadeIn = m_blendProgress, fadeOut = 1.0f - m_blendProgress;
+        for (CustomShapeInstance& s : m_shapeInstances) {
+            s.a *= fadeIn;
+            s.a2 *= fadeIn;
+            s.borderA *= fadeIn;
+        }
+        for (CustomWaveOutput& w : m_customWaves) {
+            for (CustomWavePoint& p : w.points) p.a *= fadeIn;
+        }
+        m_old->player->runCustomShapes(oldShapes);
+        m_old->player->runCustomWaves(m_milkAudio, oldWaves);
+        for (CustomShapeInstance& s : oldShapes) {
+            s.a *= fadeOut;
+            s.a2 *= fadeOut;
+            s.borderA *= fadeOut;
+            // The old preset's own shape images are not loaded; its image shapes draw untextured.
+            if (!m_old->player->shapeImage(s.shape).empty()) s.textured = false;
+        }
+        for (CustomWaveOutput& w : oldWaves) {
+            for (CustomWavePoint& p : w.points) p.a *= fadeOut;
+        }
+    }
     buildMainWave([self mainWaveSettings:levels], m_milkAudio, width, height, m_mainWave);
 
     bool imageShapes[CUSTOM_COUNT];
@@ -1106,9 +1429,11 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     }
     m_custom.begin(width, height, imageShapes);
     for (const CustomShapeInstance& shape : m_shapeInstances) m_custom.addShape(shape);
+    for (const CustomShapeInstance& shape : oldShapes) m_custom.addShape(shape);
     for (const CustomWaveOutput& wave : m_customWaves) m_custom.addWave(wave);
+    for (const CustomWaveOutput& wave : oldWaves) m_custom.addWave(wave);
     m_custom.addMainWave(m_mainWave);
-    if (m_player->frameValue("darken_center") > 0.0) m_custom.addDarkenCentre();
+    if (m_player->frameValue("darken_center") != 0.0) m_custom.addDarkenCentre();
     [self addBorders];
     const std::vector<CustomVertex>& verts = m_custom.vertices();
     if (verts.empty()) return;
@@ -1119,14 +1444,15 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     const float viewport[2] = {static_cast<float>(width), static_cast<float>(height)};
     [encoder setVertexBuffer:buffer offset:0 atIndex:0];
     [encoder setVertexBytes:viewport length:sizeof(viewport) atIndex:1];
+    id<MTLSamplerState> previousSampler = [self leftoverSampler];
     for (const CustomBatch& batch : m_custom.batches()) {
         if (batch.count == 0) continue;
         [encoder setRenderPipelineState:m_customPipelines[batch.textured ? 1 : 0][batch.additive ? 1 : 0]];
         if (batch.textured && batch.shape >= 0) {
             [encoder setFragmentTexture:shapeTextures[batch.shape] atIndex:0];
-            [encoder setFragmentSamplerState:m_repeatSampler atIndex:0];
+            [encoder setFragmentSamplerState:(imageShapes[batch.shape] ? m_repeatSampler : previousSampler) atIndex:0];
         }
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:batch.first vertexCount:batch.count];
+        [encoder drawPrimitives:(batch.lines ? MTLPrimitiveTypeLine : MTLPrimitiveTypeTriangle) vertexStart:batch.first vertexCount:batch.count];
     }
 }
 
@@ -1157,7 +1483,8 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
 }
 
 // One frame: equations, warp, custom shapes and waves, the main wave, a clamp to MilkDrop's 0..1
-// range, blur levels, then the composite into `screenPass` when there is one.
+// range, blur levels of the image the warp read, then the composite into `screenPass` when there
+// is one.
 - (void)encodeFrame:(float)dt
        internalSize:(CGSize)internalSize
            commands:(id<MTLCommandBuffer>)commands
@@ -1172,10 +1499,30 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     const int width = static_cast<int>(m_textures[0].width);
     const int height = static_cast<int>(m_textures[0].height);
 
+    if (presetMode) [self updatePresetTimer:levels fps:1.0f / dt];
+    if (m_old) {
+        m_blendProgress = (m_time - m_blendStart) / m_blendDuration;
+        if (m_blendProgress > 1.0f) m_old.reset();
+    }
+
     FrameVars f;
     float gain = m_params.gammaAdj;
     if (presetMode) {
-        f = m_player->runFrame(levels, m_time, 1.0f / dt, width, height);
+        const float progress = (m_time - m_presetStartTime) / (m_nextPresetTime - m_presetStartTime);
+        m_player->setProgress(progress);
+        if (m_frame == 0) m_timeOrigin = m_time;
+        f = m_player->runFrame(levels, m_time - m_timeOrigin, 1.0f / dt, width, height);
+        if (m_old) {
+            m_old->player->setProgress(progress);
+            m_oldFrame = m_old->player->runFrame(levels, m_time - m_timeOrigin, 1.0f / dt, width, height);
+            // Switches change at the snap point, which moves to the start or end of the blend when
+            // only one of the presets has a comp shader, so the change hides behind that shader.
+            const bool oldComp = m_old->compVersion > 0, newComp = m_compVersion > 0;
+            m_snapPoint = oldComp && !newComp ? -0.01f : (!oldComp && newComp ? 1.01f : 0.5f);
+            m_player->blendFrom(*m_old->player, cosineInterp(m_blendProgress), m_snapPoint);
+            f.decay = static_cast<float>(m_player->frameValue("decay"));
+            f.wrap = m_player->frameValue("wrap") > m_snapPoint;
+        }
         gain = m_player->gamma();
     } else {
         f = frameFromParams(m_params, m_time);
@@ -1188,8 +1535,13 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     [self buildWaveVertices:f halfWidth:halfWidth width:width height:height];
 
     PresetGpu* gpu = m_gpu.get();
-    ShaderFrameValues values;
+    PresetGpu* oldGpu = m_old ? m_old->gpu.get() : nullptr;
+    ShaderFrameValues values, oldValues;
     if (gpu != nullptr) values = [self shaderValues:levels width:width height:height fps:1.0f / dt];
+    if (oldGpu != nullptr) {
+        oldValues = [self shaderValues:levels width:width height:height fps:1.0f / dt player:*m_old->player seed:m_old->seed
+                            randPreset:m_old->randPreset start:m_old->startTime];
+    }
 
     id<MTLTexture> front = m_textures[m_front];
     id<MTLTexture> back = m_textures[1 - m_front];
@@ -1216,9 +1568,17 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
 
     if (presetMode) [self encodeMotionVectors:commands onto:front];
 
+    // The mesh with its blend alphas, and a copy with every alpha 1 for a pass that must cover the
+    // whole image.
     id<MTLBuffer> gridBuffer = [m_device newBufferWithBytes:m_warpVerts.data()
                                                      length:m_warpVerts.size() * sizeof(WarpVertex)
                                                     options:MTLResourceStorageModeShared];
+    id<MTLBuffer> opaqueGrid = gridBuffer;
+    if (m_old) {
+        std::vector<WarpVertex> opaque = m_warpVerts;
+        for (WarpVertex& v : opaque) v.alpha = 1.0f;
+        opaqueGrid = [m_device newBufferWithBytes:opaque.data() length:opaque.size() * sizeof(WarpVertex) options:MTLResourceStorageModeShared];
+    }
 
     MTLRenderPassDescriptor* feedbackPass = [MTLRenderPassDescriptor renderPassDescriptor];
     feedbackPass.colorAttachments[0].texture = back;
@@ -1226,26 +1586,43 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     feedbackPass.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:feedbackPass];
 
-    if (gpu != nullptr && gpu->hasWarp()) {
-        // A shader's unprefixed sampler_main always wraps in MilkDrop; the preset's wrap flag only
-        // governs the fixed-function warp.
-        gpu->bindWarp(encoder, front, m_blur, true, values);
-    } else {
-        // MilkDrop passes the decay to the warp as a vertex colour byte, so it is cut to 1/255 steps
-        // and wraps above 1: decay = 9.83 acts as 0.79.
+    auto drawMesh = [&](id<MTLBuffer> grid) {
+        [encoder setVertexBuffer:grid offset:0 atIndex:0];
+        [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                            indexCount:m_meshIndexCount
+                             indexType:MTLIndexTypeUInt16
+                           indexBuffer:m_meshIndices
+                     indexBufferOffset:0];
+    };
+    // MilkDrop passes the decay to the warp as a vertex colour byte, so it is cut to 1/255 steps
+    // and wraps above 1: decay = 9.83 acts as 0.79. During a blend it is the mixed decay.
+    auto fixedWarp = [&](bool blended) {
         const float stored = presetMode ? static_cast<float>(static_cast<int>(f.decay * 255.0f) & 0xFF) / 255.0f : f.decay;
         const float decay = std::pow(stored, frameScale);
-        [encoder setRenderPipelineState:m_warpPipeline];
+        [encoder setRenderPipelineState:(blended ? m_warpBlendPipeline : m_warpPipeline)];
         [encoder setFragmentTexture:front atIndex:0];
         [encoder setFragmentSamplerState:(f.wrap ? m_repeatSampler : m_clampSampler) atIndex:0];
         [encoder setFragmentBytes:&decay length:sizeof(decay) atIndex:0];
+    };
+    // A shader's unprefixed sampler_main always wraps in MilkDrop; the preset's wrap flag only
+    // governs the fixed-function warp.
+    const bool newWarpShader = gpu != nullptr && gpu->hasWarp();
+    const bool oldWarpShader = oldGpu != nullptr && oldGpu->hasWarp();
+    if (m_old && (newWarpShader || oldWarpShader)) {
+        // The old preset's warp covers the image, then the new one's is drawn over it by the mesh's
+        // blend alphas.
+        if (oldWarpShader) oldGpu->bindWarp(encoder, front, m_blur, true, oldValues);
+        else fixedWarp(false);
+        drawMesh(opaqueGrid);
+        if (newWarpShader) gpu->bindWarp(encoder, front, m_blur, true, values);
+        else fixedWarp(true);
+        drawMesh(gridBuffer);
+    } else {
+        // Two fixed warps blend through the mixed source points alone.
+        if (newWarpShader) gpu->bindWarp(encoder, front, m_blur, true, values);
+        else fixedWarp(false);
+        drawMesh(opaqueGrid);
     }
-    [encoder setVertexBuffer:gridBuffer offset:0 atIndex:0];
-    [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-                        indexCount:m_meshIndexCount
-                         indexType:MTLIndexTypeUInt16
-                       indexBuffer:m_meshIndices
-                 indexBufferOffset:0];
 
     if (presetMode) [self encodeCustom:encoder front:front levels:levels width:width height:height];
 
@@ -1268,28 +1645,56 @@ static void appendHistory(std::vector<float>& history, const float* samples, int
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [encoder endEncoding];
 
-    if (gpu != nullptr && gpu->blurLevels() > 0) [self encodeBlur:commands from:back levels:gpu->blurLevels()];
+    // MilkDrop blurs the image the warp read, after the warp, so the warp shader samples the blur
+    // made last frame. Its comp shader then shows that image and its blur, a frame behind the
+    // classic composite, which reads the new one.
+    if (m_milkwave && presetMode) [self updateFftTexture];
+    if (gpu) gpu->setFftTexture(m_fftTexture);
+    if (oldGpu) oldGpu->setFftTexture(m_fftTexture);
+    const int blurLevels = std::max(gpu ? gpu->blurLevels() : 0, oldGpu ? oldGpu->blurLevels() : 0);
+    if (blurLevels > 0) [self encodeBlur:commands from:front levels:blurLevels];
 
     if (screenPass != nil) {
         id<MTLRenderCommandEncoder> composite = [commands renderCommandEncoderWithDescriptor:screenPass];
-        if (gpu != nullptr && gpu->hasComp()) {
-            float corners[16];
-            [self hueCorners:corners classic:NO];
-            gpu->bindComp(composite, back, m_blur, true, values);
-            [composite setVertexBuffer:m_compGrid offset:0 atIndex:0];
+        float corners[16];
+        [self hueCorners:corners classic:NO];
+        auto drawComp = [&](PresetGpu& stage, const ShaderFrameValues& v, id<MTLBuffer> grid, bool flip) {
+            stage.bindComp(composite, front, m_blur, true, v, flip);
+            [composite setVertexBuffer:grid offset:0 atIndex:0];
             [composite setVertexBytes:corners length:sizeof(corners) atIndex:1];
             [composite drawIndexedPrimitives:MTLPrimitiveTypeTriangle
                                   indexCount:m_compIndexCount
                                    indexType:MTLIndexTypeUInt16
                                  indexBuffer:m_compIndices
                            indexBufferOffset:0];
+        };
+        const bool newComp = gpu != nullptr && gpu->hasComp();
+        const bool oldComp = oldGpu != nullptr && oldGpu->hasComp();
+        if (m_old && (newComp || oldComp)) {
+            // The comp grid takes its blend alpha from the warp mesh. The old comp, or MilkDrop 1's
+            // composite where a preset has no comp shader, goes underneath; a new comp is drawn over
+            // it by that alpha, and an old comp over MilkDrop 1's by one minus it.
+            id<MTLBuffer> blendGrid = [self compGridWithBlendAlpha];
+            if (newComp && oldComp) {
+                drawComp(*oldGpu, oldValues, m_compGrid, false);
+                drawComp(*gpu, values, blendGrid, false);
+            } else if (newComp) {
+                [self encodeClassicComposite:composite image:back];
+                drawComp(*gpu, values, blendGrid, false);
+            } else {
+                [self encodeClassicComposite:composite image:back];
+                drawComp(*oldGpu, oldValues, blendGrid, true);
+            }
+        } else if (newComp) {
+            drawComp(*gpu, values, m_compGrid, false);
         } else if (presetMode && m_compVersion == 0) {
             [self encodeClassicComposite:composite image:back];
         } else {
-            // A preset with a comp shader version but no comp code gets a plain copy.
+            // A preset with a comp shader version but no comp code gets a plain copy, which in
+            // MilkDrop is a comp shader and reads the same image as one.
             const float copyGain = presetMode ? 1.0f : gain;
             [composite setRenderPipelineState:m_compositePipeline];
-            [composite setFragmentTexture:back atIndex:0];
+            [composite setFragmentTexture:(presetMode ? front : back) atIndex:0];
             [composite setFragmentSamplerState:m_clampSampler atIndex:0];
             [composite setFragmentBytes:&copyGain length:sizeof(copyGain) atIndex:0];
             [composite drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];

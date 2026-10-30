@@ -137,6 +137,17 @@ sampler3D sampler_noisevol_hq;
 // HLSL normalizes a scalar to its sign.
 float normalize(float x) { return sign(x); }
 
+// HLSL's fmod keeps the sign of x. glslang lowers it to GLSL's mod, which keeps the sign of y.
+#define fmod(x, y) ((x) - (y) * trunc((x) / (y)))
+
+// Direct3D 9 sums a dot product's terms after multiplying each with 0 * infinity = 0. Writing the
+// products as a vector multiply lets the NaN guard on multiplies cover each term.
+float milk_dot(float a, float b) { return a * b; }
+float milk_dot(float2 a, float2 b) { float2 p = a * b; return p.x + p.y; }
+float milk_dot(float3 a, float3 b) { float3 p = a * b; return p.x + p.y + p.z; }
+float milk_dot(float4 a, float4 b) { float4 p = a * b; return p.x + p.y + p.z + p.w; }
+#define dot(a, b) milk_dot(a, b)
+
 #define lum(x) (dot(x,float3(0.32,0.49,0.29)))
 #define tex2d tex2D
 #define tex3d tex3D
@@ -162,43 +173,110 @@ const char* UNIFORMS[][2] = {
     {"float4", "texsize_noise_hq"}, {"float4", "texsize_noisevol_lq"}, {"float4", "texsize_noisevol_hq"},
 };
 
+// Milkwave's additions: mouse, smoothed bands, vis settings and colour shift.
+const char* MILKWAVE_UNIFORMS[][2] = {{"float4", "_c14"}, {"float4", "_c15"}, {"float4", "_c16"}, {"float4", "_c17"}};
+
+// Milkwave's additions to the header (data/include.fx): names for _c14.._c17, the FFT texture
+// and its readers, and the colour shift every shader's output passes through.
+const char* MILKWAVE_HEADER = R"(
+#define mouse _c14
+#define mouse_x _c14.x
+#define mouse_y _c14.y
+#define mouse_pos _c14.xy
+#define mouse_clicked _c14.z
+#define bass_smooth _c15.x
+#define mid_smooth  _c15.y
+#define treb_smooth _c15.z
+#define vol_smooth  _c15.w
+#define vis_intensity _c16.x
+#define vis_shift     _c16.y
+#define vis_version   _c16.z
+#define colshift_hue        _c17.x
+#define colshift_saturation _c17.y
+#define colshift_brightness _c17.z
+
+sampler2D sampler_fft;
+#define texsize_fft float4(4096.0, 2.0, 1.0/4096.0, 0.5)
+#define HAS_FFT_PEAK 1
+float get_fft(float pos) { return sqrt(tex2D(sampler_fft, float2(saturate(pos), 0.25)).x); }
+float get_fft_hz(float freq) { return get_fft(freq / 22050.0); }
+float get_fft_peak(float pos) { return sqrt(tex2D(sampler_fft, float2(saturate(pos), 0.75)).x); }
+float get_fft_peak_hz(float freq) { return get_fft_peak(freq / 22050.0); }
+
+float3 shiftHSV(float3 c)
+{
+    float3 rgb = c;
+    if (colshift_hue != 0.0 || colshift_saturation != 0.0 || colshift_brightness != 0.0)
+    {
+        float4 K = float4(0, -1.0 / 3.0, 2.0 / 3.0, -1);
+        float4 p = lerp(float4(c.bg, K.wz), float4(c.gb, K.xy), step(c.b, c.g));
+        float4 q = lerp(float4(p.xyw, c.r), float4(c.r, p.yzx), step(p.x, c.r));
+        float d = q.x - min(q.w, q.y), e = 1e-10;
+        float h = frac(abs(q.z + (q.w - q.y) / (6.0 * d + e)) + colshift_hue * 0.5);
+        float s = d / (q.x + e);
+        float v = q.x;
+        s = (colshift_saturation <= 0.0) ? s * (1.0 + colshift_saturation) : s + (1.0 - s) * colshift_saturation;
+        v = (colshift_brightness <= 0.0) ? v * (1.0 + colshift_brightness) : v + (1.0 - v) * colshift_brightness;
+        float3 t = abs(frac(h + float3(0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
+        rgb = v * lerp(float3(1, 1, 1), saturate(t - 1.0), s);
+    }
+    return rgb;
+}
+)";
+
 const char* UNIFORM_PREFIX = "MilkU";
 
-std::string uniformDeclarations() {
-    std::string out;
-    for (const auto& u : UNIFORMS) out += std::string(u[0]) + " " + UNIFORM_PREFIX + u[1] + ";\n";
-    for (const auto& u : UNIFORMS) out += std::string("static ") + u[0] + " " + u[1] + ";\n";
+std::vector<std::pair<std::string, std::string>> uniformList(bool milkwave) {
+    std::vector<std::pair<std::string, std::string>> out;
+    for (const auto& u : UNIFORMS) out.emplace_back(u[0], u[1]);
+    if (milkwave) {
+        for (const auto& u : MILKWAVE_UNIFORMS) out.emplace_back(u[0], u[1]);
+    }
     return out;
 }
 
-std::string uniformCopies() {
+std::string uniformDeclarations(bool milkwave) {
     std::string out;
-    for (const auto& u : UNIFORMS) out += std::string("    ") + u[1] + " = " + UNIFORM_PREFIX + u[1] + ";\n";
+    for (const auto& [type, name] : uniformList(milkwave)) out += type + " " + UNIFORM_PREFIX + name + ";\n";
+    for (const auto& [type, name] : uniformList(milkwave)) out += "static " + type + " " + name + ";\n";
+    return out;
+}
+
+std::string uniformCopies(bool milkwave) {
+    std::string out;
+    for (const auto& [type, name] : uniformList(milkwave)) out += "    " + name + " = " + UNIFORM_PREFIX + name + ";\n";
     return out;
 }
 
 const char* ENTRY_SIGNATURE =
     "void PS(float4 _vDiffuse : COLOR, float4 _uv : TEXCOORD0, float2 _rad_ang : TEXCOORD1, out float4 _return_value : COLOR0)\n";
 
-const char* WARP_PROLOGUE = R"(
-    float3 ret = 0;
-    float2 uv = _uv.xy;
-    float2 uv_orig = _uv.zw;
-    float rad = _rad_ang.x;
-    float ang = _rad_ang.y;
+// MilkDrop names the entry point's inputs with macros, so a preset that declares its own uv or ret
+// fails to compile, as it does in MilkDrop.
+const char* WARP_MACROS = R"(
+#define rad _rad_ang.x
+#define ang _rad_ang.y
+#define uv _uv.xy
+#define uv_orig _uv.zw
 )";
 
-const char* COMP_PROLOGUE = R"(
-    float3 ret = 0;
-    float2 uv = _uv.xy;
-    float rad = _rad_ang.x;
-    float ang = _rad_ang.y;
-    float3 hue_shader = _vDiffuse.xyz;
+const char* COMP_MACROS = R"(
+#define rad _rad_ang.x
+#define ang _rad_ang.y
+#define uv _uv.xy
+#define uv_orig _uv.xy
+#define hue_shader _vDiffuse.xyz
 )";
+
+const char* PROLOGUE = "    float3 ret = 0;\n";
 
 // MilkDrop's feedback image is 8 bits per channel, so the warp output is clamped to 0..1.
-const char* WARP_EPILOGUE = "\n    _return_value = float4(saturate(ret.xyz), 1);\n";
-const char* COMP_EPILOGUE = "\n    _return_value = float4(ret.xyz, 1);\n";
+// The vertex alpha is 1 except during a blend between presets, where it weights this shader's
+// output against the other preset's.
+const char* WARP_EPILOGUE = "\n    _return_value = float4(saturate(ret.xyz), _vDiffuse.w);\n";
+const char* COMP_EPILOGUE = "\n    _return_value = float4(ret.xyz, _vDiffuse.w);\n";
+const char* MILKWAVE_WARP_EPILOGUE = "\n    _return_value = float4(saturate(shiftHSV(ret.xyz)), _vDiffuse.w);\n";
+const char* MILKWAVE_COMP_EPILOGUE = "\n    _return_value = float4(shiftHSV(ret.xyz), _vDiffuse.w);\n";
 
 const std::set<std::string> HEADER_SAMPLERS = {
     "sampler_main", "sampler_fc_main", "sampler_pc_main", "sampler_fw_main", "sampler_pw_main",
@@ -218,7 +296,7 @@ std::once_flag g_glslangInit;
 // Preset code declares extra textures as `sampler sampler_name;`, the DX9 generic type. glslang
 // needs a dimension, so these become sampler2D (sampler3D for the noise volumes). Declarations of
 // samplers the header already has are dropped.
-std::string fixSamplerDeclarations(const std::string& code) {
+std::string fixSamplerDeclarations(const std::string& code, bool milkwave) {
     static const std::regex decl(R"(\bsampler(2D|3D)?\s+(sampler_\w+)\s*;)", std::regex::icase);
     std::string out;
     auto begin = std::sregex_iterator(code.begin(), code.end(), decl);
@@ -229,7 +307,7 @@ std::string fixSamplerDeclarations(const std::string& code) {
         std::string name = m[2].str();
         std::string lower = name;
         for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (!HEADER_SAMPLERS.count(lower)) {
+        if (!HEADER_SAMPLERS.count(name) && !(milkwave && name == "sampler_fft")) {
             const bool volume = m[1].str() == "3D" || m[1].str() == "3d" || lower.find("noisevol") != std::string::npos;
             out += std::string(volume ? "sampler3D " : "sampler2D ") + name + ";";
         }
@@ -509,7 +587,7 @@ std::string addVectorOverloads(const std::string& code) {
     return out + code.substr(last);
 }
 
-bool wrapBody(ShaderStage stage, const std::string& code, std::string& out, std::string& error) {
+bool wrapBody(ShaderStage stage, const std::string& code, std::string& out, std::string& error, bool milkwave) {
     const size_t marker = code.find("shader_body");
     if (marker == std::string::npos) {
         error = "no shader_body";
@@ -521,22 +599,22 @@ bool wrapBody(ShaderStage stage, const std::string& code, std::string& out, std:
         error = "shader_body has no braces";
         return false;
     }
-    out = uniformDeclarations();
+    out = uniformDeclarations(milkwave);
     out += SHADER_HEADER;
+    if (milkwave) out += MILKWAVE_HEADER;
     std::string deferred;
+    out += stage == ShaderStage::WARP ? WARP_MACROS : COMP_MACROS;
     out += addVectorOverloads(makeGlobalsStatic(
-        fixSamplerDeclarations(dropSamplerState(groupArrayInitialisers(fixNegatedComparisons(code.substr(0, marker))))), deferred));
-    // MilkDrop defines the comp shader's uv_orig as the same variable as uv.
-    if (stage == ShaderStage::COMP) out += "#define uv_orig uv\n";
+        fixSamplerDeclarations(dropSamplerState(groupArrayInitialisers(fixNegatedComparisons(code.substr(0, marker)))), milkwave), deferred));
     out += ENTRY_SIGNATURE;
     out += "{\n";
-    out += uniformCopies();
+    out += uniformCopies(milkwave);
     out += deferred;
-    out += stage == ShaderStage::WARP ? WARP_PROLOGUE : COMP_PROLOGUE;
-    out += "{\n";
+    out += PROLOGUE;
     out += groupArrayInitialisers(fixNegatedComparisons(code.substr(open + 1, close - open - 1)));
-    out += "\n}\n";
-    out += stage == ShaderStage::WARP ? WARP_EPILOGUE : COMP_EPILOGUE;
+    out += "\n";
+    if (milkwave) out += stage == ShaderStage::WARP ? MILKWAVE_WARP_EPILOGUE : MILKWAVE_COMP_EPILOGUE;
+    else out += stage == ShaderStage::WARP ? WARP_EPILOGUE : COMP_EPILOGUE;
     out += "}\n";
     return true;
 }
@@ -571,13 +649,16 @@ bool hlslToSpirv(const std::string& hlsl, std::vector<uint32_t>& spirv, std::str
 }
 
 // Direct3D 9 shaders multiply with 0 * infinity = 0, so 0/0 and normalize(0) give 0 where IEEE gives
-// NaN. Presets divide by zero by accident all the time, so every float multiply, divide and
-// GLSL normalize result is followed by a select that turns NaN into 0. This works on the SPIR-V
+// NaN. Presets divide by zero by accident all the time, so every float multiply (scalar, vector by
+// scalar, vector by matrix), divide and GLSL vector function result is followed by a select that
+// turns NaN into 0. This works on the SPIR-V
 // words: each such instruction gets a new result id and the original id moves to the select.
 void legacyArithmetic(std::vector<uint32_t>& spirv) {
     constexpr uint32_t OP_EXT_INST_IMPORT = 11, OP_EXT_INST = 12, OP_TYPE_BOOL = 20, OP_TYPE_FLOAT = 22, OP_TYPE_VECTOR = 23,
-                       OP_CONSTANT_NULL = 46, OP_FUNCTION = 54, OP_F_MUL = 133, OP_F_DIV = 136, OP_IS_NAN = 156, OP_SELECT = 169;
-    constexpr uint32_t GLSL_NORMALIZE = 69;
+                       OP_CONSTANT_NULL = 46, OP_FUNCTION = 54, OP_F_MUL = 133, OP_F_DIV = 136, OP_VECTOR_TIMES_SCALAR = 142,
+                       OP_VECTOR_TIMES_MATRIX = 144, OP_MATRIX_TIMES_VECTOR = 145, OP_IS_NAN = 156, OP_SELECT = 169;
+    // GLSL.std.450 FMix, Fma, Length, Distance, Cross, Normalize, FaceForward, Reflect, Refract.
+    static const std::set<uint32_t> GLSL_GUARDED = {46, 50, 66, 67, 68, 69, 70, 71, 72};
     if (spirv.size() < 5) return;
     uint32_t bound = spirv[3];
     uint32_t glslSet = 0;
@@ -642,8 +723,10 @@ void legacyArithmetic(std::vector<uint32_t>& spirv) {
     for (size_t i = firstFunction; i < spirv.size();) {
         const uint32_t op = spirv[i] & 0xffff, len = spirv[i] >> 16;
         if (len == 0) return;
-        const bool arithmetic = (op == OP_F_MUL || op == OP_F_DIV) && len == 5;
-        const bool normalize = op == OP_EXT_INST && len == 6 && glslSet != 0 && spirv[i + 3] == glslSet && spirv[i + 4] == GLSL_NORMALIZE;
+        const bool arithmetic = (op == OP_F_MUL || op == OP_F_DIV || op == OP_VECTOR_TIMES_SCALAR || op == OP_VECTOR_TIMES_MATRIX ||
+                                 op == OP_MATRIX_TIMES_VECTOR) &&
+                                len == 5;
+        const bool normalize = op == OP_EXT_INST && len >= 6 && glslSet != 0 && spirv[i + 3] == glslSet && GLSL_GUARDED.count(spirv[i + 4]);
         const uint32_t type = spirv[i + 1];
         if ((arithmetic || normalize) && floatVectorSize.count(type)) {
             const uint32_t original = spirv[i + 2];
@@ -717,13 +800,13 @@ std::vector<std::string> shaderHeaderUniforms() {
     return names;
 }
 
-bool wrappedShaderSource(ShaderStage stage, const std::string& presetCode, std::string& out, std::string& error) {
-    return wrapBody(stage, presetCode, out, error);
+bool wrappedShaderSource(ShaderStage stage, const std::string& presetCode, std::string& out, std::string& error, bool milkwave) {
+    return wrapBody(stage, presetCode, out, error, milkwave);
 }
 
-bool translateShader(ShaderStage stage, const std::string& presetCode, TranslatedShader& out, std::string& error) {
+bool translateShader(ShaderStage stage, const std::string& presetCode, TranslatedShader& out, std::string& error, bool milkwave) {
     std::string hlsl;
-    if (!wrapBody(stage, presetCode, hlsl, error)) return false;
+    if (!wrapBody(stage, presetCode, hlsl, error, milkwave)) return false;
     std::vector<uint32_t> spirv;
     if (!hlslToSpirv(hlsl, spirv, error)) return false;
     legacyArithmetic(spirv);

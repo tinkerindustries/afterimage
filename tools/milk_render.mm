@@ -2,7 +2,7 @@
 // (the .jpg beside the .milk) next to this project's frame after the given number of seconds.
 // Audio comes from the synthesiser, so a run is repeatable.
 //
-//   milk_render [--audio <file> [--audio-start <seconds>]] [--black-start] [--frames <dir> --root <dir>] <sheet.png> <seconds> <size> <preset.milk>...
+//   milk_render [--audio <file> [--audio-start <seconds>]] [--black-start] [--frames <dir> --root <dir>] [--blend-from <preset.milk>] <sheet.png> <seconds> <size> <preset.milk>...
 //
 // <size> is a pixel count for a square image, or WIDTHxHEIGHT.
 //
@@ -10,6 +10,8 @@
 // starting at --audio-start, in place of the synthesiser. --black-start begins from a black image
 // instead of noise, as a fresh MilkDrop process does. --frames <dir> --root <dir> also writes
 // each preset's frame to <dir>/<path under root, extension dropped, '/' as '__'>.png.
+// --blend-from plays that preset for two seconds first and then blends into each listed preset
+// over one second, as the app does on a key press; <seconds> then counts from the switch.
 //
 // Each preset's line on stdout ends with the frame's mean brightness, its contrast (standard
 // deviation of brightness) and its mean colour saturation, all 0..1. Pass "-" as the sheet to
@@ -165,11 +167,12 @@ int main(int argc, char** argv) {
         const char* audioPath = nullptr;
         double audioStart = 0.0;
         bool blackStart = false;
-        std::string framesDir, rootDir;
+        std::string framesDir, rootDir, blendFrom;
         int first = 1;
         while (first < argc && (std::string(argv[first]) == "--black-start" ||
                                 (first + 1 < argc && (std::string(argv[first]).rfind("--audio", 0) == 0 ||
-                                                      std::string(argv[first]) == "--frames" || std::string(argv[first]) == "--root")))) {
+                                                      std::string(argv[first]) == "--frames" || std::string(argv[first]) == "--root" ||
+                                                      std::string(argv[first]) == "--blend-from")))) {
             if (std::string(argv[first]) == "--black-start") {
                 blackStart = true;
                 first += 1;
@@ -177,13 +180,14 @@ int main(int argc, char** argv) {
             }
             if (std::string(argv[first]) == "--frames") framesDir = argv[first + 1];
             else if (std::string(argv[first]) == "--root") rootDir = argv[first + 1];
+            else if (std::string(argv[first]) == "--blend-from") blendFrom = argv[first + 1];
             else if (std::string(argv[first]) == "--audio") audioPath = argv[first + 1];
             else if (std::string(argv[first]) == "--audio-start") audioStart = std::atof(argv[first + 1]);
             else break;
             first += 2;
         }
         if (argc - first < 4) {
-            std::fprintf(stderr, "usage: %s [--audio <file> [--audio-start <seconds>]] [--black-start] [--frames <dir> --root <dir>] <sheet.png> <seconds> <size> <preset.milk>...\n", argv[0]);
+            std::fprintf(stderr, "usage: %s [--audio <file> [--audio-start <seconds>]] [--black-start] [--frames <dir> --root <dir>] [--blend-from <preset.milk>] <sheet.png> <seconds> <size> <preset.milk>...\n", argv[0]);
             return 2;
         }
         argv += first - 1;
@@ -234,7 +238,7 @@ int main(int argc, char** argv) {
                                                              outputFormat:MTLPixelFormatBGRA8Unorm
                                                              shaderSource:source
                                                                     error:&error];
-            if (renderer == nil || ![renderer loadPresetAtPath:path]) {
+            if (renderer == nil || ![renderer loadPresetAtPath:(blendFrom.empty() ? path : @(blendFrom.c_str()))]) {
                 std::fprintf(stderr, "%s: could not load (%s)\n", presets[i].c_str(), error ? error.UTF8String : "preset");
                 continue;
             }
@@ -243,6 +247,14 @@ int main(int argc, char** argv) {
             if (!blackStart) [renderer seedNoise];
             if (audioPath != nullptr) {
                 [renderer useAudioLeft:clip.left.data() right:clip.right.data() count:clip.left.size() start:clip.start];
+            }
+            if (!blendFrom.empty()) {
+                for (int f = 0; f < 120; ++f) {
+                    id<MTLCommandBuffer> commands = [queue commandBuffer];
+                    [renderer renderFrame:1.0f / 60.0f internalSize:CGSizeMake(sizeW, sizeH) target:target commands:commands];
+                    [commands commit];
+                }
+                [renderer loadPresetAtPath:path blend:1.0f];
             }
             for (int f = 0; f < frames; ++f) {
                 id<MTLCommandBuffer> commands = [queue commandBuffer];

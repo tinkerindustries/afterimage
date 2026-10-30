@@ -12,13 +12,24 @@ namespace {
 
 int failures = 0;
 
-void check(const char* name, ShaderStage stage, const std::string& globals, const std::string& body) {
+void check(const char* name, ShaderStage stage, const std::string& globals, const std::string& body, bool milkwave = false) {
     TranslatedShader shader;
     std::string error;
     const std::string code = globals + "\nshader_body\n{\n" + body + "\n}\n";
-    if (!translateShader(stage, code, shader, error)) {
+    if (!translateShader(stage, code, shader, error, milkwave)) {
         ++failures;
         std::printf("FAIL %s: %s\n", name, error.substr(0, error.find('\n')).c_str());
+    }
+}
+
+// MilkDrop fails these too, and falls back to its default shader.
+void checkRejected(const char* name, ShaderStage stage, const std::string& body, bool milkwave = false) {
+    TranslatedShader shader;
+    std::string error;
+    const std::string code = "shader_body\n{\n" + body + "\n}\n";
+    if (translateShader(stage, code, shader, error, milkwave)) {
+        ++failures;
+        std::printf("FAIL %s: compiled but should not\n", name);
     }
 }
 
@@ -40,6 +51,12 @@ int main() {
     check("division and normalize", ShaderStage::COMP, "",
           "float2 z = (uv - 0.5)*aspect.xy; float2 m = z / dot(z, z); ret.xy = normalize(m) * (z.x / z.y); ret.z = 0.5 * (1.0 / length(z));");
     check("rot matrices", ShaderStage::COMP, "", "ret = mul(float4(uv, 0, 1), rot_s1);");
+    check("fmod", ShaderStage::COMP, "", "ret = fmod(uv.xyx - 0.5, 0.3);");
+    check("writing uv", ShaderStage::WARP, "", "uv += 0.1; ret = tex2D(sampler_main, uv).xyz;");
+    checkRejected("redeclared ret", ShaderStage::COMP, "float3 ret = 1;");
+    checkRejected("redeclared uv", ShaderStage::WARP, "float2 uv = 0; ret = uv.xxx;");
+    check("Milkwave header", ShaderStage::COMP, "", "ret = get_fft(uv.x) + get_fft_peak_hz(440) + bass_smooth + mouse_x + vis_intensity;", true);
+    checkRejected("Milkwave names without Milkwave", ShaderStage::COMP, "ret = get_fft(uv.x) + bass_smooth;");
 
     std::printf("%d failures\n", failures);
     return failures == 0 ? 0 : 1;

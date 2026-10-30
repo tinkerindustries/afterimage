@@ -3,6 +3,7 @@
 #include "audio_synth.h"
 
 #include <array>
+#include <deque>
 
 namespace Milk {
 
@@ -35,6 +36,7 @@ private:
     float m_avg[3] = {0.0f, 0.0f, 0.0f};
     float m_longAvg[3] = {0.0f, 0.0f, 0.0f};
     int m_frame = 0;
+    std::array<std::deque<float>, 3> m_recentLevels;
     AudioLevels m_levels;
 };
 

@@ -1,4 +1,4 @@
-// Checks the expression engine against ns-eel's documented behaviour. Exits non-zero on a failure.
+// Checks the expression engine against projectm-eval's behaviour, which Milkwave 4.1 uses. Exits non-zero on a failure.
 
 #include "milk_expr.h"
 
@@ -39,7 +39,7 @@ void checkRejected(const char* code) {
 } // namespace
 
 int main() {
-    // Operator precedence follows ns-eel: unary minus binds tighter than ^, ^ is left associative,
+    // Operator precedence follows projectm-eval: unary minus binds tighter than ^, ^ is left associative,
     // % binds tighter than *, and | and & bind looser than comparisons.
     check("r = -2^2;", 4);
     check("r = 2^3^2;", 64);
@@ -54,7 +54,9 @@ int main() {
 
     // Guards.
     check("r = 5/0;", 0);
-    check("r = 5/0.000001;", 0);
+    check("r = 5/0.000001;", 5000000);
+    check("r = asin(2) + acos(-1.5);", 0);
+    check("r = min(exp(1000) - exp(1000), 3);", 3);
     check("r = log(-3);", 0);
     check("r = log10(0);", 0);
     check("r = pow(0,-1);", 0);
@@ -77,7 +79,7 @@ int main() {
     check("r = min(3,2)+max(1,5);", 7);
     check("r = above(3,2)+below(3,2)+equal(2,2);", 2);
     check("r = 1 ? 5 : 6;", 5);
-    check("x=0; 1 ? x=3 : x=4; r=x;", 3);
+    check("x=0; 1 ? x=3 : x=4; r=x;", 4);
 
     // Memory.
     check("x=3; 10000[5]=x; r=10000[5];", 3);
@@ -92,9 +94,50 @@ int main() {
     check("r = 0; loop(5, r = r + 1);", 5);
     check("n=0; while(n=n+1; n<10); r=n;", 10);
 
+    // rand(x) is a fraction in [0, floor(x)) from MilkDrop's Mersenne Twister, seeded 0x4141f00d.
+    check("r = rand(1);", 0.227726, 1e-6);
+    check("r = rand(0.5) < 1 && rand(4) >= 0 && rand(4) < 4;", 1);
+    check("r=0; loop(100, x=rand(10); r=r+(x!=int(x))); r=r;", 100);
+
+    // A block with one statement that fails to compile is dropped whole.
+    {
+        ExprGlobals globals;
+        VarTable vars(globals);
+        Program program;
+        std::string error;
+        program.compile("r = 3; s = (1;", vars, error);
+        program.run();
+        if (!program.empty() || vars.get("r") != 0.0) {
+            ++failures;
+            std::printf("FAIL a block with a bad statement still ran\n");
+        }
+    }
+
+    // Truth tests and equality are exact; band and bor allow 1e-5.
+    check("r = 1 == 1.000001;", 0);
+    check("r = 1 != 1.000001;", 1);
+    check("r = !0.000001;", 0);
+    check("r = if(0.000001, 5, 6);", 5);
+    check("r = band(0.000001, 1);", 0);
+
+    // Assignment binds below ?:, and ?:, sequences and assignments can be assigned to.
+    check("x = 0; 1 ? x = 1 : x = 2; r = x;", 2);
+    check("a = 0; b = 0; (0 ? a : b) = 5; r = b;", 5);
+    check("a = 1; a += 2 = 7; r = a;", 7);
+    check("r = (5 = 3);", 3);
+    check("x = 3; r = (x *= 2) + 1;", 7);
+    check("r = 0; ; r = 4;", 4);
+    check("r = 1; ();", 1);
+
     // Syntax that must not compile.
     checkRejected("r = fmod(5,3);");
-    checkRejected("1 + 2 = 3;");
+    checkRejected("r = .;");
+    checkRejected("r = 0x1f;");
+    checkRejected("r = 1.2.3;");
+    checkRejected("; r = 1;");
+    checkRejected("min = 1;");
+    checkRejected("r = 1 ? 2;");
+    checkRejected("r = rand();");
 
     std::printf("%d failures\n", failures);
     return failures == 0 ? 0 : 1;

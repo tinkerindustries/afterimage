@@ -14,6 +14,11 @@ struct AudioLevels {
     float bassAtt = 1.0f;
     float midAtt = 1.0f;
     float trebAtt = 1.0f;
+    // Milkwave's bass_smooth, mid_smooth and treb_smooth: the mean of the last second of bass,
+    // mid and treb.
+    float bassSmooth = 1.0f;
+    float midSmooth = 1.0f;
+    float trebSmooth = 1.0f;
 };
 
 // Plain data so the world can be saved and restored as bytes.

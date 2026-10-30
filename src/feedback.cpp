@@ -37,7 +37,8 @@ void computeMesh(const FrameVars& vars, const PerVertexFn& perVertex, const Audi
             const float gridX = static_cast<float>(i) / (MESH_X - 1);
             const float gridY = static_cast<float>(j) / (MESH_Y - 1);
             const float x = gridX * 2.0f - 1.0f;
-            const float y = -(gridY * 2.0f - 1.0f);
+            // Written so the centre row is +0, which puts its ang at +pi left of centre, as in MilkDrop.
+            const float y = 1.0f - gridY * 2.0f;
             // The per-pixel x and y span 0.5 +- half the aspect on each axis, so a wide window's y
             // covers less than 0..1.
             vv.x = 0.5f + x * 0.5f * aspectX;

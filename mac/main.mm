@@ -23,6 +23,8 @@
     else if (c == 'c') [self.renderer toggleColourCycle];
     else if (c == 'r') [self.renderer toggleWrap];
     else if (c == 'a') [self.renderer toggleAudioSource];
+    else if (c == 'l') [self.renderer togglePresetLock];
+    else if (c == 'h') [self.renderer toggleHardCuts];
     else if (c == ' ') [self.renderer clear];
     else if (c == 'f') [self.window toggleFullScreen:nil];
     else if (c == 27) {

@@ -33,10 +33,14 @@ struct TranslatedShader {
 // compiles HLSL -> SPIR-V (glslang) -> MSL (SPIRV-Cross). The fragment inputs are
 // [[user(locn0)]] colour (float4), [[user(locn1)]] uv (float4: uv.xy, uv_orig.zw) and
 // [[user(locn2)]] rad and ang (float2).
-bool translateShader(ShaderStage stage, const std::string& presetCode, TranslatedShader& out, std::string& error);
+// `milkwave` adds Milkwave 4.1's header additions: _c14.._c17, sampler_fft with get_fft and the
+// colour shift.
+bool translateShader(ShaderStage stage, const std::string& presetCode, TranslatedShader& out, std::string& error,
+                     bool milkwave = false);
 
 // The HLSL that translateShader hands to glslang, for inspecting a failure.
-bool wrappedShaderSource(ShaderStage stage, const std::string& presetCode, std::string& out, std::string& error);
+bool wrappedShaderSource(ShaderStage stage, const std::string& presetCode, std::string& out, std::string& error,
+                         bool milkwave = false);
 
 // The names of the header's uniforms, which every translated shader's uniformOffsets should hold.
 std::vector<std::string> shaderHeaderUniforms();

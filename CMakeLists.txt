@@ -135,7 +135,8 @@ if(APPLE)
     src/milk_preset.cpp
     src/milk_custom.cpp
     src/milk_audio.cpp
-    src/milk_wave.cpp)
+    src/milk_wave.cpp
+    src/milk_blend.cpp)
   target_include_directories(milk_mac PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/mac)
   target_compile_options(milk_mac PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
   target_compile_definitions(milk_mac PRIVATE MILK_PRESET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/presets")
@@ -165,6 +166,11 @@ if(APPLE)
   add_custom_command(TARGET milk_preset_list_test POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/mac/shaders.metal $<TARGET_FILE_DIR:milk_preset_list_test>)
   add_test(NAME preset_list COMMAND milk_preset_list_test)
+  add_executable(milk_blur_test tools/blur_test.mm)
+  target_compile_options(milk_blur_test PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+  target_compile_definitions(milk_blur_test PRIVATE MILK_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+  target_link_libraries(milk_blur_test PRIVATE "-framework Foundation" "-framework Metal")
+  add_test(NAME blur COMMAND milk_blur_test)
 
   # macOS ties the audio capture permission to the app's signature, so sign the whole bundle.
   add_custom_command(TARGET MilkMetal POST_BUILD

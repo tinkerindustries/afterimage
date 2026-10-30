@@ -63,6 +63,16 @@ void BandLevels::update(const float* left, int count, float frameScale, const fl
         *level[b] = silent ? quiet : imm[b] / m_longAvg[b];
         *att[b] = silent ? quiet : m_avg[b] / m_longAvg[b];
     }
+    float* smooth[3] = {&m_levels.bassSmooth, &m_levels.midSmooth, &m_levels.trebSmooth};
+    const size_t window = static_cast<size_t>(std::max(1.0f, fps));
+    for (int b = 0; b < 3; ++b) {
+        std::deque<float>& recent = m_recentLevels[b];
+        recent.push_back(*level[b]);
+        while (recent.size() > window) recent.pop_front();
+        float sum = 0.0f;
+        for (float v : recent) sum += v;
+        *smooth[b] = sum / static_cast<float>(recent.size());
+    }
     ++m_frame;
 }
 

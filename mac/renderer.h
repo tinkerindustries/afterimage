@@ -20,6 +20,9 @@ extern NSString* const MilkPresetDidChangeNotification;
                                   error:(NSString* _Nullable* _Nullable)error;
 
 - (BOOL)loadPresetAtPath:(NSString*)path;
+// With `seconds` above 0 and a preset playing, blends from it to the new preset over that time,
+// as MilkDrop does.
+- (BOOL)loadPresetAtPath:(NSString*)path blend:(float)seconds;
 
 // For offline rendering: plays `count` stereo samples at 48 kHz from sample `start` instead of the
 // synthesiser. The samples before `start` (up to two seconds) settle the band levels.
@@ -37,6 +40,10 @@ extern NSString* const MilkPresetDidChangeNotification;
 - (void)toggleWrap;
 - (void)toggleAudioSource;
 - (void)clear;
+// Stops automatic preset changes, by timer and by hard cut.
+- (void)togglePresetLock;
+// Hard cuts change preset on a loud beat. They start off, as in MilkDrop.
+- (void)toggleHardCuts;
 
 // Every preset the app can step through, named by its path under the presets folder without the
 // .milk extension, in stepping order.

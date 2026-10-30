@@ -64,9 +64,11 @@ struct CustomShapeInstance {
     float r, g, b, a;
     float r2, g2, b2, a2;
     float borderR, borderG, borderB, borderA;
+    bool border;  // border_a above 0 before its colour wraps, which is when MilkDrop draws it
 };
 
-// Runs one custom wave's init, per_frame and per_point code each frame.
+// Runs one custom wave's init code when the preset loads, and its per_frame and per_point code
+// each frame.
 class CustomWave {
 public:
     CustomWave(const CustomWaveDef& def, ExprGlobals& globals);
@@ -75,6 +77,9 @@ public:
 
     bool enabled() const { return m_enabled; }
     const std::vector<std::string>& errors() const { return m_errors; }
+    // Runs the init code, which MilkDrop runs at load whether or not the wave is enabled. `in.q`
+    // holds the values per_frame_init left.
+    void init(const CustomFrameInputs& in);
     // Returns false when the wave draws nothing this frame.
     bool run(const CustomFrameInputs& in, const MilkAudioFrame& audio, CustomWaveOutput& out);
 
@@ -89,11 +94,11 @@ private:
     Program m_init;
     Program m_perFrame;
     Program m_perPoint;
-    bool m_initialised = false;
     std::array<double, 8> m_tInit{};
 };
 
-// Runs one custom shape's init code once and its per_frame code for every instance.
+// Runs one custom shape's init code when the preset loads and its per_frame code for every
+// instance each frame.
 class CustomShape {
 public:
     CustomShape(const CustomShapeDef& def, ExprGlobals& globals);
@@ -103,6 +108,7 @@ public:
     bool enabled() const { return m_enabled; }
     const std::string& image() const { return m_image; }
     const std::vector<std::string>& errors() const { return m_errors; }
+    void init(const CustomFrameInputs& in);
     void run(int index, const CustomFrameInputs& in, std::vector<CustomShapeInstance>& out);
 
 private:
@@ -116,7 +122,6 @@ private:
     VarTable m_vars;
     Program m_init;
     Program m_perFrame;
-    bool m_initialised = false;
     std::array<double, 8> m_tInit{};
 };
 

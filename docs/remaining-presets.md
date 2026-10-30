@@ -22,7 +22,7 @@ Every shader translates, compiles as Metal and links. `build/milk_shader_check p
 
 ## Equation code that fails to compile (2 presets)
 
-MilkDrop joins equation lines with nothing between them, so a line that ends without a `;` runs into the next and the statement is dropped. `build/milk_preset_check presets -v` lists them. None go non-finite in 300 frames.
+MilkDrop joins equation lines with nothing between them, so a line that ends without a `;` runs into the next and the whole block is dropped. `build/milk_preset_check presets -v` lists them. None go non-finite in 300 frames.
 
 - high_frequency/suksma - Hexcollie - Julian Carnival - shimmy dumb grid dogmaklyasm nz+5
 - high_frequency/suksma - Hexcollie - Julian Carnival - shimmy dumb grid dogmaklyasm nz+6

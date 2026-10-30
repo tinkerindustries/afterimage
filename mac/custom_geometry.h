@@ -14,18 +14,21 @@ struct CustomVertex {
 };
 
 // A run of vertices drawn with one pipeline and texture. `shape` names the textured shape whose
-// texture to bind, and is -1 for untextured runs.
+// texture to bind, and is -1 for untextured runs. `lines` runs are pairs of vertices drawn as
+// one-pixel aliased lines; the rest are triangles.
 struct CustomBatch {
     size_t first = 0;
     size_t count = 0;
     bool additive = false;
     bool textured = false;
     int shape = -1;
+    bool lines = false;
 };
 
-// Turns custom shape instances, custom wave points and the main waveform into triangles,
-// converting MilkDrop's coordinates into pixels the way MilkDrop places them. Lines are one
-// pixel of the feedback image wide, as MilkDrop's are.
+// Turns custom shape instances, custom wave points and the main waveform into triangles and
+// lines, converting MilkDrop's coordinates into pixels the way MilkDrop places them. Lines are
+// Direct3D 9's: one pixel of the feedback image, aliased, and a thick one is four of them offset
+// by a pixel.
 class CustomGeometry {
 public:
     // `imageShapes[i]` is true when shape i samples its own image rather than the previous frame.
@@ -45,8 +48,8 @@ public:
 
 private:
     void toPixels(float clipX, float clipY, float& px, float& py) const;
-    void startBatch(bool additive, bool textured, int shape);
-    void addSegment(float x0, float y0, float x1, float y1, const float c0[4], const float c1[4], float halfWidth);
+    void startBatch(bool additive, bool textured, int shape, bool lines = false);
+    void addLine(float x0, float y0, float x1, float y1, const float c0[4], const float c1[4]);
     void addSquare(float x, float y, float half, const float c[4]);
 
     int m_width = 1;

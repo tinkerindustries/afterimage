@@ -10,6 +10,10 @@ namespace Milk {
 // The per-frame and preset values MilkDrop's main waveform reads.
 struct MainWaveSettings {
     int mode = 0;
+    // 8 for MilkDrop 2, 18 for Milkwave 4.1's extra modes. The mode drawn is mode % modeCount
+    // with C's sign rule, and a negative result draws MilkDrop's untouched buffer: 480 points at
+    // the centre with wave_a as it is.
+    int modeCount = 8;
     float x = 0.5f;          // wave_x, 0..1 left to right
     float y = 0.5f;          // wave_y, 0..1 bottom to top
     float mystery = 0.0f;    // wave_mystery
@@ -27,6 +31,14 @@ struct MainWaveSettings {
     float time = 0.0f;
     float vol = 1.0f;        // 0.333 * (bass + mid + treb)
     float treb = 1.0f;       // the raw treble band sum, as mode 3 reads it
+    float bass = 1.0f;       // bass and mid relative to the song average, as mode 17 reads them
+    float mid = 1.0f;
+    // During a blend between presets: the old preset's nWaveMode as its file gives it, with no
+    // modulo, and the cosine mix towards the new one. A different old mode is drawn too and its
+    // points morph into the new.
+    bool blending = false;
+    int oldMode = -1;
+    float blendMix = 1.0f;
 };
 
 // The waveform as MilkDrop draws it: up to two polylines in clip space (-1..1, y up), one colour,
@@ -41,7 +53,7 @@ struct MainWave {
 };
 
 // Builds the main waveform for an image of width x height pixels, following MilkDrop's eight
-// wave modes.
+// wave modes and Milkwave's ten more.
 void buildMainWave(const MainWaveSettings& settings, const MilkAudioFrame& audio, int width, int height, MainWave& out);
 
 } // namespace Milk

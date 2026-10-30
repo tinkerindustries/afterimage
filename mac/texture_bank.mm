@@ -152,7 +152,8 @@ TextureBank::TextureBank(id<MTLDevice> device, const std::string& textureDir) : 
             MTLSamplerDescriptor* desc = [MTLSamplerDescriptor new];
             desc.minFilter = f ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
             desc.magFilter = desc.minFilter;
-            desc.mipFilter = f ? MTLSamplerMipFilterLinear : MTLSamplerMipFilterNotMipmapped;
+            // Point sampling still picks the nearest mip level, as Direct3D 9's point mip filter does.
+            desc.mipFilter = f ? MTLSamplerMipFilterLinear : MTLSamplerMipFilterNearest;
             const MTLSamplerAddressMode mode = w ? MTLSamplerAddressModeRepeat : MTLSamplerAddressModeClampToEdge;
             desc.sAddressMode = mode;
             desc.tAddressMode = mode;
@@ -164,52 +165,83 @@ TextureBank::TextureBank(id<MTLDevice> device, const std::string& textureDir) : 
 
 TextureBank::Lookup TextureBank::parse(const std::string& samplerName) {
     Lookup out;
-    out.name = lower(samplerName);
-    if (out.name.rfind("sampler_", 0) == 0) out.name = out.name.substr(8);
-    static const struct { const char* prefix; bool filtered; bool wrap; } PREFIXES[] = {
-        {"fw_", true, true}, {"fc_", true, false}, {"pw_", false, true}, {"pc_", false, false},
-        {"wf_", true, true}, {"cf_", true, false}, {"wp_", false, true}, {"cp_", false, false},
-    };
-    for (const auto& p : PREFIXES) {
-        if (out.name.rfind(p.prefix, 0) == 0) {
-            out.name = out.name.substr(3);
-            out.filtered = p.filtered;
-            out.wrap = p.wrap;
-            out.prefixed = true;
-            break;
+    out.name = samplerName.rfind("sampler_", 0) == 0 ? samplerName.substr(8) : samplerName;
+    // MilkDrop peels off any two characters and an underscore, and reads them as filtering and
+    // wrapping when they are one of these.
+    if (out.name.size() > 3 && out.name[2] == '_') {
+        const std::string code = {static_cast<char>(std::toupper(static_cast<unsigned char>(out.name[0]))),
+                                  static_cast<char>(std::toupper(static_cast<unsigned char>(out.name[1])))};
+        static const struct { const char* code; bool filtered; bool wrap; } PREFIXES[] = {
+            {"FW", true, true}, {"FC", true, false}, {"PW", false, true}, {"PC", false, false},
+            {"WF", true, true}, {"CF", true, false}, {"WP", false, true}, {"CP", false, false},
+        };
+        for (const auto& p : PREFIXES) {
+            if (code == p.code) {
+                out.filtered = p.filtered;
+                out.wrap = p.wrap;
+                out.prefixed = true;
+            }
         }
+        out.name = out.name.substr(3);
     }
     return out;
 }
 
 id<MTLSamplerState> TextureBank::sampler(bool filtered, bool wrap) const { return m_samplers[filtered ? 1 : 0][wrap ? 1 : 0]; }
 
+namespace {
+
+const char* BUILT_IN[] = {"noise_lq", "noise_lq_lite", "noise_mq", "noise_hq", "noisevol_lq", "noisevol_hq"};
+
+// randNN with NN from 00 to 15, alone or followed by "_" and a file name prefix.
+bool isRandomName(const std::string& name) {
+    if (name.rfind("rand", 0) != 0 || name.size() < 6) return false;
+    if (!std::isdigit(static_cast<unsigned char>(name[4])) || !std::isdigit(static_cast<unsigned char>(name[5]))) return false;
+    if (name.size() > 6 && name[6] != '_') return false;
+    return std::stoi(name.substr(4, 2)) <= 15;
+}
+
+} // namespace
+
+std::vector<std::string> TextureBank::randomPool(const std::string& name) const {
+    const std::string prefix = name.size() > 7 ? lower(name.substr(7)) : "";
+    std::vector<std::string> pool;
+    for (const std::string& n : m_names) {
+        if (n.rfind(prefix, 0) == 0) pool.push_back(n);
+    }
+    return pool;
+}
+
 bool TextureBank::has(const std::string& name) const {
-    static const char* BUILT_IN[] = {"noise_lq", "noise_lq_lite", "noise_mq", "noise_hq", "noisevol_lq", "noisevol_hq"};
     for (const char* n : BUILT_IN) {
         if (name == n) return true;
     }
-    if (name.rfind("rand", 0) == 0 && name.size() >= 6 && std::isdigit(static_cast<unsigned char>(name[4])) &&
-        std::isdigit(static_cast<unsigned char>(name[5])) && (name.size() == 6 || name[6] == '_')) {
-        return !m_names.empty();
-    }
-    return m_files.count(name) > 0;
+    if (isRandomName(name)) return !randomPool(name).empty();
+    return m_files.count(lower(name)) > 0;
+}
+
+id<MTLTexture> TextureBank::black(bool volume) {
+    const int slot = volume ? 1 : 0;
+    if (m_black[slot] != nil) return m_black[slot];
+    MTLTextureDescriptor* desc = [MTLTextureDescriptor new];
+    desc.textureType = volume ? MTLTextureType3D : MTLTextureType2D;
+    desc.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    desc.width = desc.height = desc.depth = 1;
+    desc.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> tex = [m_device newTextureWithDescriptor:desc];
+    const uint8_t pixel[4] = {0, 0, 0, 255};
+    [tex replaceRegion:MTLRegionMake3D(0, 0, 0, 1, 1, 1) mipmapLevel:0 slice:0 withBytes:pixel bytesPerRow:4 bytesPerImage:4];
+    m_black[slot] = tex;
+    return tex;
 }
 
 id<MTLTexture> TextureBank::texture(const std::string& name, uint32_t presetSeed) {
     // Random picks vary per preset, so they skip the cache.
-    if (name.rfind("rand", 0) == 0 && name.size() >= 6 && std::isdigit(static_cast<unsigned char>(name[4])) &&
-        std::isdigit(static_cast<unsigned char>(name[5]))) {
-        const std::string filter = name.size() > 7 && name[6] == '_' ? name.substr(7) : "";
-        std::vector<std::string> pool;
-        for (const std::string& n : m_names) {
-            if (filter.empty() || n.rfind(filter, 0) == 0) pool.push_back(n);
-        }
-        if (pool.empty()) pool = m_names;
-        if (!pool.empty()) {
-            const uint32_t pick = hash32(presetSeed * 31u + static_cast<uint32_t>(std::stoi(name.substr(4, 2))));
-            return texture(pool[pick % pool.size()], presetSeed);
-        }
+    if (isRandomName(name)) {
+        const std::vector<std::string> pool = randomPool(name);
+        if (pool.empty()) return nil;
+        const uint32_t pick = hash32(presetSeed * 31u + static_cast<uint32_t>(std::stoi(name.substr(4, 2))));
+        return texture(pool[pick % pool.size()], presetSeed);
     }
 
     auto cached = m_cache.find(name);
@@ -223,12 +255,8 @@ id<MTLTexture> TextureBank::texture(const std::string& name, uint32_t presetSeed
     else if (name == "noisevol_lq") tex = noise3D(32, 1, 5);
     else if (name == "noisevol_hq") tex = noise3D(32, 4, 6);
     else {
-        auto file = m_files.find(name);
+        auto file = m_files.find(lower(name));
         if (file != m_files.end()) tex = load(file->second);
-        if (tex == nil) {
-            NSLog(@"no texture named %s, using noise", name.c_str());
-            tex = texture("noise_hq", presetSeed);
-        }
     }
     m_cache[name] = tex;
     return tex;
