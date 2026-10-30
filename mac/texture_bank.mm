@@ -184,6 +184,18 @@ TextureBank::Lookup TextureBank::parse(const std::string& samplerName) {
 
 id<MTLSamplerState> TextureBank::sampler(bool filtered, bool wrap) const { return m_samplers[filtered ? 1 : 0][wrap ? 1 : 0]; }
 
+bool TextureBank::has(const std::string& name) const {
+    static const char* BUILT_IN[] = {"noise_lq", "noise_lq_lite", "noise_mq", "noise_hq", "noisevol_lq", "noisevol_hq"};
+    for (const char* n : BUILT_IN) {
+        if (name == n) return true;
+    }
+    if (name.rfind("rand", 0) == 0 && name.size() >= 6 && std::isdigit(static_cast<unsigned char>(name[4])) &&
+        std::isdigit(static_cast<unsigned char>(name[5])) && (name.size() == 6 || name[6] == '_')) {
+        return !m_names.empty();
+    }
+    return m_files.count(name) > 0;
+}
+
 id<MTLTexture> TextureBank::texture(const std::string& name, uint32_t presetSeed) {
     // Random picks vary per preset, so they skip the cache.
     if (name.rfind("rand", 0) == 0 && name.size() >= 6 && std::isdigit(static_cast<unsigned char>(name[4])) &&

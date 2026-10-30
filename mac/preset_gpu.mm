@@ -13,12 +13,30 @@ PresetGpu::PresetGpu(id<MTLDevice> device, id<MTLFunction> warpVertex, id<MTLFun
     if (compCode.find("shader_body") != std::string::npos) build(m_comp, ShaderStage::COMP, compCode, compVertex, drawableFormat);
 }
 
-void PresetGpu::build(Stage& stage, ShaderStage kind, const std::string& code, id<MTLFunction> vertex, MTLPixelFormat format) {
+void PresetGpu::build(Stage& stage, ShaderStage kind, const std::string& code, id<MTLFunction> vertex, MTLPixelFormat format,
+                      bool fallback) {
     const char* label = kind == ShaderStage::WARP ? "warp" : "comp";
     std::string error;
     if (!translateShader(kind, code, stage.shader, error)) {
         m_errors.push_back(std::string(label) + " shader: " + error.substr(0, error.find('\n')));
         return;
+    }
+    // MilkDrop cannot load a shader that samples a texture it does not have, and uses its plain
+    // default shader for that stage instead.
+    if (!fallback) {
+        for (const TranslatedShader::Sampler& s : stage.shader.samplers) {
+            const TextureBank::Lookup lookup = TextureBank::parse(s.name);
+            const bool builtIn = lookup.name == "main" || lookup.name == "blur1" || lookup.name == "blur2" || lookup.name == "blur3";
+            if (!builtIn && !m_bank.has(lookup.name)) {
+                m_errors.push_back(std::string(label) + " shader: no texture named " + lookup.name + ", using the default shader");
+                stage = Stage{};
+                const char* plain = kind == ShaderStage::WARP
+                                        ? "shader_body\n{\n    ret = tex2D( sampler_main, uv ).xyz;\n    ret -= 0.004;\n}\n"
+                                        : "shader_body\n{\n    ret = tex2D(sampler_main, uv).xyz;\n}\n";
+                build(stage, kind, plain, vertex, format, true);
+                return;
+            }
+        }
     }
     NSError* nsError = nil;
     // The translated shader turns NaN into 0 as Direct3D 9 does, which fast math would remove.

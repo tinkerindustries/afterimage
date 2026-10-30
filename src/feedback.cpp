@@ -25,7 +25,7 @@ void computeMesh(const FrameVars& vars, const PerVertexFn& perVertex, const Audi
     const float aspectX = (height > width) ? static_cast<float>(width) / height : 1.0f;
     const float aspectY = (width > height) ? static_cast<float>(height) / width : 1.0f;
     const float warpTime = time * vars.warpSpeed;
-    const float warpScaleInv = 1.0f / std::max(vars.warpScale, 0.01f);
+    const float warpScaleInv = 1.0f / vars.warpScale;
     const float f0 = 11.68f + 4.0f * std::cos(warpTime * 1.413f + 10.0f);
     const float f1 = 8.77f + 3.0f * std::cos(warpTime * 1.113f + 7.0f);
     const float f2 = 10.54f + 3.0f * std::cos(warpTime * 1.233f + 3.0f);
@@ -56,8 +56,8 @@ void computeMesh(const FrameVars& vars, const PerVertexFn& perVertex, const Audi
             vv.sy = vars.sy;
             if (perVertex) perVertex(vv, audio, time);
 
-            const float zoom2 = std::pow(std::max(vv.zoom, 0.01f), std::pow(std::max(vv.zoomExp, 0.01f), vv.rad * 2.0f - 1.0f));
-            const float zoomInv = 1.0f / std::max(zoom2, 1e-6f);
+            const float zoom2 = std::pow(vv.zoom, std::pow(vv.zoomExp, vv.rad * 2.0f - 1.0f));
+            const float zoomInv = 1.0f / zoom2;
             float u = x * aspectX * 0.5f * zoomInv + 0.5f;
             float v = -y * aspectY * 0.5f * zoomInv + 0.5f;
 
@@ -83,6 +83,9 @@ void computeMesh(const FrameVars& vars, const PerVertexFn& perVertex, const Audi
 
             u = (u - 0.5f) / aspectX + 0.5f;
             v = (v - 0.5f) / aspectY + 0.5f;
+            // MilkDrop applies no limits, so a zoom of -1 mirrors the image. A coordinate that comes out
+            // infinite or NaN would be garbage there too, and is sent to the centre instead.
+            if (!std::isfinite(u) || !std::isfinite(v)) u = v = 0.5f;
             out[j * MESH_X + i] = MeshUv{u, v};
         }
     }

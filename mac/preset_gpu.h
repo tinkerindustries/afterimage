@@ -57,7 +57,8 @@ private:
         std::vector<uint8_t> uniforms;
     };
 
-    void build(Stage& stage, ShaderStage kind, const std::string& code, id<MTLFunction> vertex, MTLPixelFormat format);
+    void build(Stage& stage, ShaderStage kind, const std::string& code, id<MTLFunction> vertex, MTLPixelFormat format,
+               bool fallback = false);
     void bind(Stage& stage, id<MTLRenderCommandEncoder> encoder, id<MTLTexture> main, id<MTLTexture> const blurs[3],
               bool wrapMain, const ShaderFrameValues& values);
 

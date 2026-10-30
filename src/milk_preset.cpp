@@ -348,10 +348,14 @@ FrameVars PresetPlayer::runFrame(const AudioLevels& audio, float time, float fps
     f.waveThick = std::fabs(get("wave_thick")) > 0.00001f;
     f.wrap = std::fabs(get("wrap")) > 0.00001f;
     m_gamma = get("gamma");
-    // The warp wraps a decay above 1 itself, as MilkDrop does, so clampFrame must not cut it.
-    const float decay = f.decay;
+    // MilkDrop applies no limits to these, and the warp wraps a decay above 1 itself, so a negative
+    // zoom still mirrors the image.
+    const float decay = f.decay, zoom = f.zoom, sx = f.sx, sy = f.sy;
     clampFrame(f);
     f.decay = decay;
+    f.zoom = zoom;
+    f.sx = sx;
+    f.sy = sy;
 
     m_customInputs.time = time;
     m_customInputs.fps = fps;
@@ -375,8 +379,6 @@ void PresetPlayer::runVertex(VertexVars& v) {
     for (int i = 0; i < 14; ++i) *m_vertexSlots[i] = *fields[i];
     m_perPixel.run();
     for (int i = 4; i < 14; ++i) *fields[i] = finiteOr(*m_vertexSlots[i], *fields[i]);
-    if (std::fabs(v.sx) < 0.01f) v.sx = 0.01f;
-    if (std::fabs(v.sy) < 0.01f) v.sy = 0.01f;
 }
 
 } // namespace Milk

@@ -29,6 +29,9 @@ public:
     // seeded per preset. A name with no image falls back to a generated noise texture.
     id<MTLTexture> texture(const std::string& name, uint32_t presetSeed);
 
+    // Whether a name is a texture MilkDrop could load: a built-in, a randNN pick, or an image file.
+    bool has(const std::string& name) const;
+
 private:
     id<MTLTexture> noise2D(int size, int zoom, uint32_t seed);
     id<MTLTexture> noise3D(int size, int zoom, uint32_t seed);
