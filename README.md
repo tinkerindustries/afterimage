@@ -46,6 +46,7 @@ The feedback image is the window's size in points, not Retina pixels, which is w
 Launch it with `open build/Milk.app`. Keys:
 
 - `N` and `P`: next and previous preset
+- `Cmd+L`, or Presets > Preset List…: a window listing every preset under `presets/`. Type to filter, then double-click a row or press Return to play it. The playing preset is marked and the list follows it when it changes. Presets > Next Preset and Previous Preset (`Cmd+]` and `Cmd+[`) step through the same list.
 - `1` to `5`: built-in motion (still, pulse, sway, storm, ripple)
 - `W`: next wave mode
 - `C`: colour cycling on or off

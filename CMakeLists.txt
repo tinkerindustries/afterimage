@@ -149,6 +149,7 @@ if(APPLE)
 
   add_executable(MilkMetal MACOSX_BUNDLE
     mac/main.mm
+    mac/preset_list.mm
     ${MILK_METAL_SHADERS})
   set_target_properties(MilkMetal PROPERTIES
     OUTPUT_NAME Milk
@@ -157,6 +158,14 @@ if(APPLE)
     MACOSX_BUNDLE_EXECUTABLE_NAME Milk)
   target_compile_options(MilkMetal PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
   target_link_libraries(MilkMetal PRIVATE milk_mac)
+  add_executable(milk_preset_list_test tools/preset_list_test.mm mac/preset_list.mm)
+  target_compile_options(milk_preset_list_test PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+  target_link_libraries(milk_preset_list_test PRIVATE milk_mac)
+  # The renderer reads shaders.metal from the main bundle, which for a bare executable is its folder.
+  add_custom_command(TARGET milk_preset_list_test POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/mac/shaders.metal $<TARGET_FILE_DIR:milk_preset_list_test>)
+  add_test(NAME preset_list COMMAND milk_preset_list_test)
+
   # macOS ties the audio capture permission to the app's signature, so sign the whole bundle.
   add_custom_command(TARGET MilkMetal POST_BUILD
     COMMAND codesign --force --sign - $<TARGET_BUNDLE_DIR:MilkMetal>)

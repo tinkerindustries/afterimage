@@ -1,3 +1,4 @@
+#import "preset_list.h"
 #import "renderer.h"
 
 #import <Cocoa/Cocoa.h>
@@ -38,6 +39,7 @@
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @property (nonatomic, strong) NSWindow* window;
 @property (nonatomic, strong) MilkView* view;
+@property (nonatomic, strong) PresetListController* presetList;
 @end
 
 @implementation AppDelegate
@@ -52,6 +54,13 @@
     [appMenu addItem:[NSMenuItem separatorItem]];
     [appMenu addItemWithTitle:@"Quit Milk" action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = appMenu;
+    NSMenuItem* presetsItem = [NSMenuItem new];
+    [menuBar addItem:presetsItem];
+    NSMenu* presetsMenu = [[NSMenu alloc] initWithTitle:@"Presets"];
+    [presetsMenu addItemWithTitle:@"Preset List\u2026" action:@selector(showPresetList:) keyEquivalent:@"l"];
+    [presetsMenu addItemWithTitle:@"Next Preset" action:@selector(nextPreset:) keyEquivalent:@"]"];
+    [presetsMenu addItemWithTitle:@"Previous Preset" action:@selector(previousPreset:) keyEquivalent:@"["];
+    presetsItem.submenu = presetsMenu;
     NSApp.mainMenu = menuBar;
 
     const NSRect frame = NSMakeRect(0, 0, 1280, 720);
@@ -76,6 +85,11 @@
         return;
     }
     self.view.delegate = self.view.renderer;
+    self.presetList = [[PresetListController alloc] initWithRenderer:self.view.renderer];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(presetDidChange:)
+                                                 name:MilkPresetDidChangeNotification
+                                               object:self.view.renderer];
 
     self.window.contentView = self.view;
     self.window.title = self.view.renderer.status;
@@ -84,6 +98,15 @@
     [self.window makeFirstResponder:self.view];
     [NSApp activate];
 }
+
+- (void)showPresetList:(id)sender { [self.presetList showWindow]; }
+
+- (void)nextPreset:(id)sender { [self.view.renderer nextPreset]; }
+
+- (void)previousPreset:(id)sender { [self.view.renderer previousPreset]; }
+
+// The window title names the preset, so it follows every change, whichever way it was made.
+- (void)presetDidChange:(NSNotification*)note { self.window.title = self.view.renderer.status; }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)app { return YES; }
 

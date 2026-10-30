@@ -166,6 +166,8 @@ float squishToCenter(float x, float exponent) {
 
 } // namespace
 
+NSString* const MilkPresetDidChangeNotification = @"MilkPresetDidChange";
+
 @implementation MilkRenderer {
     id<MTLDevice> m_device;
     id<MTLCommandQueue> m_queue;
@@ -205,6 +207,7 @@ float squishToCenter(float x, float exponent) {
     AudioSource m_source;
     std::string m_tapError;
     std::vector<std::string> m_presetPaths;
+    NSArray<NSString*>* m_presetNames;
     int m_presetIndex;
     std::unique_ptr<PresetPlayer> m_player;
     std::unique_ptr<TextureBank> m_bank;
@@ -464,6 +467,24 @@ float squishToCenter(float x, float exponent) {
         if (entry.is_regular_file() && entry.path().extension() == ".milk") m_presetPaths.push_back(entry.path().string());
     }
     std::sort(m_presetPaths.begin(), m_presetPaths.end());
+    NSMutableArray<NSString*>* names = [NSMutableArray arrayWithCapacity:m_presetPaths.size()];
+    const std::string root = std::string(MILK_PRESET_DIR) + "/";
+    for (const std::string& path : m_presetPaths) {
+        std::string name = path.rfind(root, 0) == 0 ? path.substr(root.size()) : path;
+        name = name.substr(0, name.size() - std::string(".milk").size());
+        [names addObject:@(name.c_str())];
+    }
+    m_presetNames = names;
+}
+
+- (NSArray<NSString*>*)presetNames { return m_presetNames ?: @[]; }
+
+- (NSInteger)currentPresetIndex { return m_presetIndex; }
+
+- (void)selectPresetAtIndex:(NSInteger)index {
+    if (index < 0 || index >= static_cast<NSInteger>(m_presetPaths.size())) return;
+    m_presetIndex = static_cast<int>(index);
+    [self loadPresetAtPath:@(m_presetPaths[m_presetIndex].c_str())];
 }
 
 - (void)stepPreset:(int)delta {
@@ -509,6 +530,7 @@ float squishToCenter(float x, float exponent) {
                                             m_drawableFormat, *m_bank, warpCode, compCode, m_presetSeed);
         for (const std::string& e : m_gpu->errors()) NSLog(@"%s: %s", file.name.c_str(), e.c_str());
     }
+    [[NSNotificationCenter defaultCenter] postNotificationName:MilkPresetDidChangeNotification object:self];
     return YES;
 }
 

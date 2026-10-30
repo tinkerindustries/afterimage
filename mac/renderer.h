@@ -4,6 +4,9 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+// Posted on the default centre after a preset loads, whether by key, menu or the preset list.
+extern NSString* const MilkPresetDidChangeNotification;
+
 @interface MilkRenderer : NSObject <MTKViewDelegate>
 
 // For the window: reads shaders.metal from the app bundle, finds the presets and listens to
@@ -34,6 +37,13 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)toggleWrap;
 - (void)toggleAudioSource;
 - (void)clear;
+
+// Every preset the app can step through, named by its path under the presets folder without the
+// .milk extension, in stepping order.
+@property (nonatomic, readonly) NSArray<NSString*>* presetNames;
+// The index in presetNames of the preset playing now, or -1 when none has been chosen.
+@property (nonatomic, readonly) NSInteger currentPresetIndex;
+- (void)selectPresetAtIndex:(NSInteger)index;
 // Starts the next frame from random noise instead of black, the way a preset in MilkDrop starts
 // from whatever image came before it.
 - (void)seedNoise;
